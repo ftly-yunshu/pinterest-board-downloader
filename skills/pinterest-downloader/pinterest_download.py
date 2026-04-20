@@ -1,620 +1,877 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-   Pinterest Board Downloader - Standalone Edition (v2.0)
+   Pinterest Board Downloader - Standalone Edition (v3.0)
 ================================================================================
 
-一个独立的、零框架依赖的 Pinterest 画板下载工具。
-支持图片 + 视频 + 高清化升级，一条命令完成全量采集。
+一个独立的、零框架依赖的 Pinterest 画板批量下载工具。
 
 兼容：Python 3.8+ | macOS / Linux / Windows
 适用：任何 AI 工具（ChatGPT / Claude / Gemini / Copilot / Cursor 等）
 
 --------------------------------------------------------------------------------
-用法：
-    python3 pinterest_board_downloader.py <画板URL> [输出目录]
+用法（简单）：
+    python3 pinterest_download.py <画板URL>
+    python3 pinterest_download.py <画板URL> <输出目录>
 
-示例：
-    python3 pinterest_board_downloader.py https://www.pinterest.com/user/ui/
-    python3 pinterest_board_downloader.py https://www.pinterest.com/user/ui/ ./my_images
+用法（完整）：
+    python3 pinterest_download.py <URL> \\
+        --output ./my_images \\
+        --concurrency 8 \\
+        --max-pins 500 \\
+        --cookies cookies.txt \\
+        --name-by pin \\
+        --no-video
 
 依赖安装（仅需一次）：
     pip install playwright aiohttp
     playwright install chromium
+
+安全与隐私：
+  本工具不会请求、存储或发送你的 Pinterest 账号密码。
+  访问私密画板请使用浏览器导出的 cookies.txt（Netscape 格式），通过 --cookies 传入。
+
+法律：
+  请只下载你拥有或有权使用的内容。下载的素材版权归原作者所有，
+  请遵守 Pinterest ToS 及目标国家/地区的版权法律，仅用于个人离线备份或学习。
 --------------------------------------------------------------------------------
 """
 
+import argparse
 import asyncio
 import os
-import sys
+import random
 import re
+import sys
 import time
-import json
 import urllib.parse
 import urllib.request
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
+__version__ = "3.0.0"
+
 # ================================================================
-# 可调参数（AI 可以根据用户需求修改这些值）
+# 默认参数（可通过 CLI 覆盖）
 # ================================================================
 
-SCROLL_PAUSE = 1.5            # 每次滚动后等待秒数
-MAX_SCROLLS = 500             # 最大滚动次数上限
-STAGNANT_LIMIT = 5           # 连续N次无新内容则停止滚动
-IMAGE_TIMEOUT = 30            # 图片下载超时(秒)
-IMAGE_DELAY = 0.5             # 图片下载间隔(秒)
-VIDEO_CONCURRENCY = 20        # 视频检测并发数
-VIDEO_HTTP_TIMEOUT = 10       # 视频pin页面请求超时(秒)
-HQ_THRESHOLD = 15 * 1024      # 小于此值的文件尝试高清升级(字节)
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+DEFAULTS = {
+    "scroll_pause": 1.5,           # 每次滚动后等待秒数
+    "max_scrolls": 800,            # 最大滚动次数上限（保护）
+    "stagnant_limit": 6,           # 连续 N 次无新内容则停止滚动
+    "image_concurrency": 8,        # 图片并发下载数（保守：避免被封）
+    "image_timeout": 30,           # 单次图片下载超时
+    "image_retries": 3,            # 图片失败重试次数（指数退避）
+    "video_concurrency": 20,       # 视频检测并发数（纯读 HTML）
+    "video_http_timeout": 10,      # 视频 pin 页面请求超时
+    "hq_rescue_threshold": 15 * 1024,  # 下载完成后小于此值的文件做"补救升级"
+    "min_valid_bytes": 512,        # 小于此字节数的响应视为无效
+}
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+]
+
+# Pinterest CDN 尺寸段（从大到小）；/originals/ 通常是最大，但不是所有图都有
+CDN_SIZE_SEGMENTS = ["/originals/", "/1200x/", "/736x/", "/564x/", "/474x/", "/236x/"]
 
 
-def log(msg):
+def log(msg: str) -> None:
     """带时间戳的日志"""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def pick_ua() -> str:
+    return random.choice(USER_AGENTS)
+
+
 # ================================================================
-# Phase 1 - 滚动画板，收集图片URL和Pin链接（需要Playwright浏览器）
+# Cookie 工具 —— 支持 Netscape 格式（浏览器扩展常见导出格式）
 # ================================================================
 
-async def collect_board_data(board_url: str, output_dir: str):
+def load_cookies(cookies_path: str):
     """
-    用 Playwright 无头浏览器打开 Pinterest 画板页面，自动滚动加载全部内容，
-    从 DOM 中提取所有图片 URL 和 Pin 链接。
+    读取 Netscape 格式 cookies.txt，返回 (jar, dict_for_playwright_context)。
+    失败时返回 (None, None)，不中断流程。
+    """
+    if not cookies_path or not os.path.exists(cookies_path):
+        return None, None
+    try:
+        jar = MozillaCookieJar(cookies_path)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        pw_cookies = []
+        for c in jar:
+            if "pinterest" not in (c.domain or "").lower():
+                continue
+            pw_cookies.append({
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain,
+                "path": c.path or "/",
+                "secure": bool(c.secure),
+                "httpOnly": False,
+                "sameSite": "Lax",
+            })
+        log(f"🔐 已加载 {len(pw_cookies)} 条 Pinterest cookies")
+        return jar, pw_cookies
+    except Exception as e:
+        log(f"⚠️ 加载 cookies 失败: {e}，将以匿名模式继续")
+        return None, None
 
-    参数:
-        board_url: Pinterest 画板完整URL，如 "https://www.pinterest.com/user/board/"
-        output_dir: 输出目录路径，用于缓存中间数据
 
-    返回:
-        (image_urls: list[str], pin_ids: list[str])
+def cookie_header_from_jar(jar) -> str:
+    if not jar:
+        return ""
+    parts = []
+    for c in jar:
+        if "pinterest" in (c.domain or "").lower():
+            parts.append(f"{c.name}={c.value}")
+    return "; ".join(parts)
+
+
+# ================================================================
+# Phase 1 — 滚动收集（Playwright）
+# ================================================================
+
+async def collect_board_data(board_url: str, output_dir: str, cfg: dict):
+    """
+    用 Playwright 打开画板，自动滚动收集：
+      - 原始高清 image URL（优先读 srcset 里最大的那张）
+      - Pin ID（用于后续视频检测与命名）
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        log("❌ 缺少依赖: 请先运行 `pip install playwright && playwright install chromium`")
+        log("❌ 缺少依赖: pip install playwright && playwright install chromium")
         sys.exit(1)
 
-    all_img_urls = []
-    all_pin_ids = []
+    image_records = []  # [(pin_id_or_none, original_url), ...] 保留顺序与出现关系
     seen_urls = set()
+    pin_ids = []
     seen_pins = set()
 
-    log(f"启动浏览器...")
-    
+    log("启动浏览器 ...")
     p = await async_playwright().start()
     browser = await p.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled"],
     )
     ctx = await browser.new_context(
-        user_agent=USER_AGENT,
-        viewport={"width": 1920, "height": 1080}
+        user_agent=pick_ua(),
+        viewport={"width": 1920, "height": 1080},
+        locale="en-US",
     )
+
+    # 注入 cookies（私密画板）
+    _, pw_cookies = cfg["_pw_cookies"], cfg["_pw_cookies"]
+    if pw_cookies:
+        try:
+            await ctx.add_cookies(pw_cookies)
+        except Exception as e:
+            log(f"⚠️ 注入 cookies 失败: {e}")
+
     page = await ctx.new_page()
     page.set_default_timeout(60000)
 
     try:
         log(f"正在打开: {board_url}")
         resp = await page.goto(board_url, wait_until="domcontentloaded", timeout=30000)
-        
         if resp and resp.status >= 400:
-            log(f"⚠️ 页面返回状态码: {resp.status}")
-        
-        # 等待初始内容渲染
-        await asyncio.sleep(4)
+            log(f"⚠️ 页面返回状态码 {resp.status}；如是 403/404 请检查画板链接或登录态")
 
-        stagnant_count = 0
-        prev_total_imgs = 0
+        # 等待 network 相对稳定 + 一些内容渲染
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
 
-        for scroll_i in range(1, MAX_SCROLLS + 1):
-            # ---- 从DOM提取图片URL ----
-            urls = await page.evaluate('''() => {
-                const results = new Set();
-                // 策略1: 所有 <img> 标签的 src 属性
-                document.querySelectorAll('img').forEach(img => {
-                    let src = img.src || img.dataset.src || img.getAttribute('data-src') || '';
-                    if (src && src.startsWith('http') &&
-                        (src.includes('pinimg.com') || src.includes('i.pinimg.com'))) {
-                        results.add(src.split('?')[0]);
+        stagnant = 0
+        prev_total = 0
+
+        # JS：一次性返回图片（pin_id + 最高分辨率 url） + 所有 pin_id
+        js_extract = r"""
+        () => {
+            // 把 /XXXx/ 段升级成最大可用尺寸 URL（用于做候选列表）
+            const toOriginal = (u) => {
+                if (!u) return u;
+                const m = u.match(/(\/\d+x\/|\/originals\/)/);
+                if (!m) return u;
+                // 先试 originals，后面下载阶段会自行回退
+                return u.replace(m[1], '/originals/');
+            };
+
+            const imgs = [];
+            const seenU = new Set();
+
+            // 1) 遍历所有 <a href="/pin/xxx/"> 这类卡片，从卡片内部找 <img>
+            document.querySelectorAll('a[href*="/pin/"]').forEach(a => {
+                const pinMatch = a.href.match(/\/pin\/(\d+)/);
+                const pid = pinMatch ? pinMatch[1] : null;
+                const imgEl = a.querySelector('img');
+                if (!imgEl) return;
+
+                // 优先 srcset 最高分辨率
+                let best = null;
+                const srcset = imgEl.srcset || imgEl.getAttribute('srcset') || '';
+                if (srcset) {
+                    // srcset: "url1 1x, url2 2x" 或 "url1 236w, url2 474w"
+                    const parts = srcset.split(',').map(s => s.trim()).filter(Boolean);
+                    let maxW = 0;
+                    for (const p of parts) {
+                        const [u, d] = p.split(/\s+/);
+                        if (!u) continue;
+                        const w = d ? parseFloat(d) : 0;
+                        if (w >= maxW) { maxW = w; best = u; }
                     }
-                });
-                // 策略2: background-image CSS样式
-                document.querySelectorAll('[style*="background-image"]').forEach(el => {
-                    const style = el.getAttribute('style') || '';
-                    const match = style.match(/url\\(["']?([^"')]+)["']?\\)/);
-                    if (match && match[1] && match[1].startsWith('http')) {
-                        results.add(match[1].split('?')[0]);
-                    }
-                });
-                return [...results];
-            }''')
+                }
+                if (!best) best = imgEl.src || imgEl.getAttribute('data-src') || '';
+                if (!best || !best.startsWith('http')) return;
+                if (!/pinimg\.com/.test(best)) return;
 
-            new_count = 0
-            for url in urls:
-                if url not in seen_urls:
-                    seen_urls.add(url)
-                    all_img_urls.append(url)
-                    new_count += 1
+                best = best.split('?')[0];
+                const originalGuess = toOriginal(best);
+                if (seenU.has(originalGuess)) return;
+                seenU.add(originalGuess);
 
-            # ---- 从DOM提取Pin链接 ----
-            pins = await page.evaluate('''() => {
-                const pins = new Set();
-                document.querySelectorAll('a[href*="/pin/"]').forEach(a => {
-                    const m = a.href.match(/\\/pin\\/(\\d+)/);
-                    if (m) pins.add(m[1]);
-                });
-                return [...pins];
-            }''')
+                imgs.push({ pin: pid, url: best, orig_guess: originalGuess });
+            });
 
-            for pid in pins:
+            // 2) 兜底：画板首屏 background-image 样式
+            document.querySelectorAll('[style*="background-image"]').forEach(el => {
+                const style = el.getAttribute('style') || '';
+                const m = style.match(/url\(["']?([^"')]+)["']?\)/);
+                if (!m) return;
+                const u = m[1];
+                if (!u.startsWith('http') || !/pinimg\.com/.test(u)) return;
+                const clean = u.split('?')[0];
+                const og = toOriginal(clean);
+                if (seenU.has(og)) return;
+                seenU.add(og);
+                imgs.push({ pin: null, url: clean, orig_guess: og });
+            });
+
+            // 3) 所有 pin 链接（包括可能没有可见 <img> 的）
+            const pins = new Set();
+            document.querySelectorAll('a[href*="/pin/"]').forEach(a => {
+                const m = a.href.match(/\/pin\/(\d+)/);
+                if (m) pins.add(m[1]);
+            });
+
+            return { imgs: imgs, pins: [...pins] };
+        }
+        """
+
+        for scroll_i in range(1, cfg["max_scrolls"] + 1):
+            data = await page.evaluate(js_extract)
+            new_imgs = 0
+            for item in data.get("imgs", []):
+                og = item["orig_guess"]
+                if og in seen_urls:
+                    continue
+                seen_urls.add(og)
+                image_records.append((item.get("pin"), item.get("url"), og))
+                new_imgs += 1
+
+            for pid in data.get("pins", []):
                 if pid not in seen_pins:
                     seen_pins.add(pid)
-                    all_pin_ids.append(pid)
+                    pin_ids.append(pid)
 
-            total_imgs = len(all_img_urls)
-            total_pins = len(all_pin_ids)
+            total = len(image_records)
+            if scroll_i % 10 == 0 or new_imgs > 5:
+                log(f"  滚动 #{scroll_i}: 图片 {total} (+{new_imgs}), Pin {len(pin_ids)}")
 
-            if scroll_i % 15 == 0 or new_count > 5:
-                log(f"  滚动 #{scroll_i}: 图片 {total_imgs} 张 (+{new_count}), Pin {total_pins} 个")
-
-            # 判断是否到达底部
-            if total_imgs == prev_total_imgs:
-                stagnant_count += 1
-                if stagnant_count >= STAGNANT_LIMIT:
-                    log(f"  连续{STAGNANT_LIMIT}次无新内容，已到底部")
+            if total == prev_total:
+                stagnant += 1
+                if stagnant >= cfg["stagnant_limit"]:
+                    log(f"  连续 {cfg['stagnant_limit']} 次无新内容，视为到达底部")
                     break
             else:
-                stagnant_count = 0
-            
-            prev_total_imgs = total_imgs
+                stagnant = 0
+            prev_total = total
 
-            # 执行滚动
+            # 随机抖动滚动节奏
             await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-            await asyncio.sleep(SCROLL_PAUSE)
+            await asyncio.sleep(cfg["scroll_pause"] + random.uniform(0.0, 0.6))
 
-        # 保存缓存文件
-        _save_cache(os.path.join(output_dir, "_urls_cache.txt"), all_img_urls)
-        _save_cache(os.path.join(output_dir, "_pins_cache.txt"), all_pin_ids)
+        # 写缓存，便于排查
+        _save_cache(os.path.join(output_dir, "_urls_cache.txt"),
+                    [f"{pid or '-'}\t{u}\t{og}" for pid, u, og in image_records])
+        _save_cache(os.path.join(output_dir, "_pins_cache.txt"), pin_ids)
 
-        log(f"\n✅ 收集完成: {len(all_img_urls)} 张图片, {len(all_pin_ids)} 个 Pin")
-
+        log(f"✅ 收集完成: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
     finally:
         await browser.close()
         await p.stop()
 
-    return all_img_urls, all_pin_ids
+    return image_records, pin_ids
 
 
 # ================================================================
-# Phase 2 - 并发检测哪些Pin包含视频（纯HTTP，无需浏览器）
+# Phase 2 — 并发检测视频 Pin
 # ================================================================
 
-async def detect_video_pins(pin_ids: list, output_dir: str):
-    """
-    对每个 Pin 页面发送 HTTP GET 请求，从 HTML 中用正则匹配视频 URL。
-    使用 aiohttp 并发加速，速度比逐个浏览器打开快约100倍。
-
-    参数:
-        pin_ids: Pin ID列表（纯数字字符串）
-        output_dir: 输出目录（用于缓存结果）
-
-    返回:
-        list of (pin_id, video_url, video_type) 元组
-    """
+async def detect_video_pins(pin_ids, output_dir: str, cfg: dict):
     try:
         import aiohttp
     except ImportError:
-        log("⚠️ 缺少aiohttp，跳过视频检测。运行: pip install aiohttp")
+        log("⚠️ 缺少 aiohttp，跳过视频检测。pip install aiohttp")
         return []
 
-    log(f"并发检测 {len(pin_ids)} 个 Pin 是否含视频... (并发={VIDEO_CONCURRENCY})")
+    if not pin_ids:
+        return []
+
+    log(f"并发检测 {len(pin_ids)} 个 Pin 是否含视频（并发 {cfg['video_concurrency']}）...")
 
     video_results = []
     checked = 0
-    sem = asyncio.Semaphore(VIDEO_CONCURRENCY)
+    sem = asyncio.Semaphore(cfg["video_concurrency"])
+    cookie_header = cfg.get("_cookie_header", "")
 
     async def check_one(session, pin_id: str):
         nonlocal checked
         async with sem:
             url = f"https://www.pinterest.com/pin/{pin_id}/"
+            headers = {
+                "User-Agent": pick_ua(),
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            if cookie_header:
+                headers["Cookie"] = cookie_header
             try:
                 async with session.get(
                     url,
-                    timeout=aiohttp.ClientTimeout(total=VIDEO_HTTP_TIMEOUT),
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    }
+                    timeout=aiohttp.ClientTimeout(total=cfg["video_http_timeout"]),
+                    headers=headers,
                 ) as resp:
                     if resp.status != 200:
                         return None
                     html = await resp.text()
-
-                    # 匹配 MP4 直链
-                    mp4_m = re.search(r'https?://[^\s"\'><]+\.mp4', html)
-                    if mp4_m:
-                        return (pin_id, mp4_m.group(0), "mp4")
-
-                    # 匹配 HLS 流地址
-                    hls_m = re.search(r'https?://[^\s"\'><]+\.m3u8', html)
-                    if hls_m:
-                        return (pin_id, hls_m.group(0), "m3u8")
-
+                    # 先 MP4 直链
+                    mp4 = re.search(r'https?://[^\s"\'><]+\.mp4', html)
+                    if mp4:
+                        return (pin_id, mp4.group(0), "mp4")
+                    # HLS
+                    m3u8 = re.search(r'https?://[^\s"\'><]+\.m3u8', html)
+                    if m3u8:
+                        return (pin_id, m3u8.group(0), "m3u8")
                     return None
             except Exception:
                 return None
             finally:
                 checked += 1
                 if checked % 100 == 0 or checked == len(pin_ids):
-                    current_vids = len(video_results)
-                    log(f"  已检查 {checked}/{len(pin_ids)} 个... 发现 {current_vids} 个视频")
+                    log(f"  已检查 {checked}/{len(pin_ids)}，发现视频 {len(video_results)}")
 
-    connector = aiohttp.TCPConnector(limit=VIDEO_CONCURRENCY + 5)
+    connector = aiohttp.TCPConnector(limit=cfg["video_concurrency"] + 5)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [check_one(session, pid) for pid in pin_ids]
-        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for r in raw_results:
-        if isinstance(r, tuple) and r is not None:
+    for r in raw:
+        if isinstance(r, tuple):
             video_results.append(r)
 
-    # 保存缓存
-    vid_path = os.path.join(output_dir, "_video_list.txt")
-    with open(vid_path, "w") as f:
+    vid_cache = os.path.join(output_dir, "_video_list.txt")
+    with open(vid_cache, "w") as f:
         for pid, vurl, vtype in video_results:
             f.write(f"{pid}\t{vtype}\t{vurl}\n")
 
     log(f"✅ 视频检测完成: {len(video_results)} 个")
-    for i, (pid, vurl, vtype) in enumerate(video_results, 1):
-        log(f"  [{i}] #{pid} → {vtype}")
-
+    mp4_cnt = sum(1 for _, _, t in video_results if t == "mp4")
+    hls_cnt = sum(1 for _, _, t in video_results if t == "m3u8")
+    if hls_cnt:
+        log(f"  其中 MP4 直链: {mp4_cnt}, HLS(m3u8): {hls_cnt}（HLS 需 ffmpeg 处理，见 README）")
     return video_results
 
 
 # ================================================================
-# Phase 3 - 批量下载图片
+# Phase 3 — 并发下载图片（先试原图，失败再降级）
 # ================================================================
 
-def download_images(image_urls: list, output_dir: str):
+def _build_variant_urls(original_url: str):
     """
-    遍历所有图片URL并逐个下载到本地。
-    支持断点续传（跳过已存在的大文件）和多尺寸变体回退。
-
-    参数:
-        image_urls: 图片URL列表
-        output_dir: 输出目录
-
-    返回:
-        (success_count, fail_count)
+    基于 URL 中的尺寸段，按"原图优先"的顺序生成候选。
+    保证：首个候选是 /originals/（如果能构造出来）。
     """
+    variants = []
+    seen = set()
+
+    def _push(u):
+        if u and u not in seen:
+            seen.add(u)
+            variants.append(u)
+
+    # 找到 URL 里的尺寸段
+    seg_found = None
+    for seg in CDN_SIZE_SEGMENTS:
+        if seg in original_url:
+            seg_found = seg
+            break
+
+    if seg_found:
+        # 按 CDN_SIZE_SEGMENTS 的顺序生成候选（大 -> 小）
+        for seg in CDN_SIZE_SEGMENTS:
+            _push(original_url.replace(seg_found, seg))
+    _push(original_url)
+    return variants
+
+
+async def download_images_async(image_records, output_dir: str, cfg: dict, name_by: str):
+    """
+    并发下载所有图片。每个 URL：
+      1. 生成候选列表（原图优先）
+      2. 对每个候选执行 `image_retries` 次指数退避重试
+      3. 记录成功/失败
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        log("❌ 需要 aiohttp: pip install aiohttp")
+        sys.exit(1)
+
     os.makedirs(output_dir, exist_ok=True)
+    sem = asyncio.Semaphore(cfg["image_concurrency"])
+    cookie_header = cfg.get("_cookie_header", "")
+
+    # 已下载清单（持久化去重）
+    manifest_path = os.path.join(output_dir, "_manifest.txt")
+    done_keys = set()
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            for line in f:
+                k = line.strip().split("\t")[0]
+                if k:
+                    done_keys.add(k)
+
+    log(f"开始下载 {len(image_records)} 张图片（并发 {cfg['image_concurrency']}，每张最多重试 {cfg['image_retries']} 次）")
+
     success = 0
     fail = 0
     skipped = 0
+    lock = asyncio.Lock()
 
-    for idx, img_url in enumerate(image_urls, 1):
-        ext = _guess_ext(img_url)
-        filename = f"pinterest_{idx:04d}{ext}"
+    async def download_one(session, idx: int, pin_id, original_url: str, orig_guess: str):
+        nonlocal success, fail, skipped
+
+        # 使用 orig_guess 作为去重 key（最稳定的表示）
+        key = orig_guess
+        if key in done_keys:
+            async with lock:
+                skipped += 1
+            return
+
+        ext = _guess_ext(original_url)
+        if name_by == "pin" and pin_id:
+            filename = f"pin_{pin_id}_{idx:04d}{ext}"
+        else:
+            filename = f"pinterest_{idx:04d}{ext}"
         save_path = os.path.join(output_dir, filename)
 
-        # 断点续传：已存在的有效文件跳过
-        if os.path.exists(save_path) and os.path.getsize(save_path) > HQ_THRESHOLD:
-            skipped += 1
-            if skipped <= 5 or idx % 100 == 0:
-                sz = os.path.getsize(save_path)
-                log(f"  ⊘ [{idx}] 已存在: {filename} ({sz//1024}KB)")
-            continue
+        # 磁盘存在 + 大于最小阈值 => 视为已完成
+        if os.path.exists(save_path) and os.path.getsize(save_path) > cfg["min_valid_bytes"]:
+            async with lock:
+                done_keys.add(key)
+                with open(manifest_path, "a") as f:
+                    f.write(f"{key}\t{filename}\t{os.path.getsize(save_path)}\n")
+                skipped += 1
+            return
 
-        downloaded = False
+        candidates = _build_variant_urls(original_url)
+        # 额外尝试 orig_guess（若与首个候选不同）
+        if orig_guess not in candidates:
+            candidates.insert(0, orig_guess)
 
-        # --- 尝试1: 直接下载原始URL ---
-        downloaded = _try_download(img_url, save_path, idx)
+        best_ok = False
+        last_err = ""
 
-        # --- 尝试2: 如果失败，尝试其他CDN尺寸变体 ---
-        if not downloaded:
-            downloaded = _try_variants(img_url, save_path, idx)
+        async with sem:
+            for var_url in candidates:
+                for attempt in range(cfg["image_retries"]):
+                    headers = {
+                        "User-Agent": pick_ua(),
+                        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                        "Referer": "https://www.pinterest.com/",
+                    }
+                    if cookie_header:
+                        headers["Cookie"] = cookie_header
+                    try:
+                        async with session.get(
+                            var_url,
+                            timeout=aiohttp.ClientTimeout(total=cfg["image_timeout"]),
+                            headers=headers,
+                        ) as resp:
+                            if resp.status == 404:
+                                break  # 这个尺寸不存在，换下一个
+                            if resp.status >= 400:
+                                last_err = f"HTTP {resp.status}"
+                                if resp.status in (429, 503):
+                                    # 被限流：指数退避
+                                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1.0))
+                                    continue
+                                break
+                            data = await resp.read()
+                            if len(data) < cfg["min_valid_bytes"]:
+                                last_err = f"too small ({len(data)}B)"
+                                break
+                            # 写盘
+                            with open(save_path, "wb") as f:
+                                f.write(data)
+                            best_ok = True
+                            async with lock:
+                                done_keys.add(key)
+                                with open(manifest_path, "a") as mf:
+                                    mf.write(f"{key}\t{filename}\t{len(data)}\n")
+                                success_local = None
+                            break
+                    except asyncio.TimeoutError:
+                        last_err = "timeout"
+                    except Exception as e:
+                        last_err = str(e)[:80]
+                    # 重试前退避
+                    await asyncio.sleep(0.5 * (2 ** attempt) + random.uniform(0, 0.3))
+                if best_ok:
+                    break
 
-        if downloaded:
-            success += 1
-        else:
-            fail += 1
-            log(f"  ✗ [{idx}] 失败: {img_url[:80]}")
+        async with lock:
+            if best_ok:
+                success += 1
+                if success <= 3 or success % 50 == 0:
+                    sz = os.path.getsize(save_path)
+                    log(f"  ✓ [{idx}] {filename} ({sz//1024}KB)")
+            else:
+                fail += 1
+                log(f"  ✗ [{idx}] {original_url[:70]} - {last_err}")
+        # 礼貌延迟（抖动）
+        await asyncio.sleep(random.uniform(0.05, 0.2))
 
-        time.sleep(IMAGE_DELAY)
+    connector = aiohttp.TCPConnector(limit=cfg["image_concurrency"] + 5,
+                                     ssl=False)  # Pinterest CDN 有时证书链奇怪
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [
+            download_one(session, idx, pid, url, og)
+            for idx, (pid, url, og) in enumerate(image_records, 1)
+        ]
+        await asyncio.gather(*tasks)
 
     log(f"\n图片结果: ✓{success} ✗{fail} ⊘{skipped}")
     return success, fail
 
 
 # ================================================================
-# Phase 4 - 批量下载视频
+# Phase 4 — 下载视频（MP4 直链）
 # ================================================================
 
-def download_videos(video_results: list, output_dir: str):
-    """
-    将检测到的视频URL批量下载到 videos/ 子目录。
-
-    参数:
-        video_results: [(pin_id, url, type), ...]
-        output_dir: 输出根目录
-
-    返回:
-        (success_count, fail_count)
-    """
+def download_videos(video_results, output_dir: str, cfg: dict):
     videos_dir = os.path.join(output_dir, "videos")
     os.makedirs(videos_dir, exist_ok=True)
 
+    hls_dir = os.path.join(output_dir, "videos_hls")
+
     success = 0
     fail = 0
+    hls_pending = 0
 
     for idx, (pin_id, video_url, video_type) in enumerate(video_results, 1):
-        ext = ".mp4" if video_type == "mp4" else ".ts"
-        filename = f"video_{idx:03d}_{pin_id}{ext}"
-        save_path = os.path.join(videos_dir, filename)
+        if video_type == "m3u8":
+            # 不直接下 HLS（需要 ffmpeg）；但记录到文件供后续处理
+            os.makedirs(hls_dir, exist_ok=True)
+            with open(os.path.join(hls_dir, "m3u8_list.txt"), "a") as f:
+                f.write(f"{pin_id}\t{video_url}\n")
+            hls_pending += 1
+            continue
 
+        filename = f"video_{idx:03d}_{pin_id}.mp4"
+        save_path = os.path.join(videos_dir, filename)
         if os.path.exists(save_path) and os.path.getsize(save_path) > 1024:
             log(f"  ⊘ [{idx}] 已存在: {filename}")
             success += 1
             continue
 
-        ok = _try_download(
-            video_url, save_path, idx,
-            extra_headers={"Referer": "https://www.pinterest.com/", "Accept": "video/mp4,*/*"},
-            timeout=60
+        ok = _sync_download(
+            video_url, save_path,
+            extra_headers={"Referer": "https://www.pinterest.com/",
+                           "Accept": "video/mp4,*/*"},
+            timeout=120, retries=3,
+            cookie_header=cfg.get("_cookie_header", ""),
         )
-
         if ok:
+            log(f"  ✓ [{idx}] {filename} ({os.path.getsize(save_path)//1024}KB)")
             success += 1
         else:
-            fail += 1
             log(f"  ✗ [{idx}] 视频: {video_url[:60]}")
-
-        time.sleep(0.5)
+            fail += 1
+        time.sleep(random.uniform(0.3, 0.7))
 
     log(f"\n视频结果: ✓{success} ✗{fail}")
+    if hls_pending:
+        log(f"  HLS(m3u8) 待处理: {hls_pending} 个；清单：{hls_dir}/m3u8_list.txt")
+        log(f"  处理示例: ffmpeg -i <m3u8_url> -c copy out.mp4")
     return success, fail
 
 
 # ================================================================
-# Phase 5 - 小图高清化升级
+# Phase 5 — 补救式高清化（给没走到 /originals/ 的漏网之鱼）
 # ================================================================
 
-def upgrade_small_images(output_dir: str):
-    """
-    扫描输出目录中小于阈值的图片文件，尝试从CDN获取更大分辨率版本。
-    通过替换URL中的尺寸标识（originals ↔ 736x ↔ 564x 等）来获取不同尺寸。
-
-    参数:
-        output_dir: 输出目录
-
-    返回:
-        升级成功的数量
-    """
+def upgrade_small_images(output_dir: str, cfg: dict):
     cache_file = os.path.join(output_dir, "_urls_cache.txt")
     if not os.path.exists(cache_file):
-        log("未找到URL缓存文件，跳过高清化")
         return 0
-
+    urls = []
     with open(cache_file) as f:
-        all_urls = [line.strip() for line in f if line.strip()]
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                urls.append(parts[1])
 
-    # 找出需要升级的小图
     small_files = []
     for fname in sorted(os.listdir(output_dir)):
-        if not fname.startswith("pinterest_"):
+        if not (fname.startswith("pinterest_") or fname.startswith("pin_")):
             continue
         fpath = os.path.join(output_dir, fname)
-        if not os.path.isfile(fpath) or os.path.getsize(fpath) >= HQ_THRESHOLD:
+        if not os.path.isfile(fpath) or os.path.getsize(fpath) >= cfg["hq_rescue_threshold"]:
             continue
-        # 解析序号: pinterest_0001.jpg -> idx=0
-        parts = fname.replace(".jpg","").replace(".png","").replace(".gif","").replace(".webp","").split("_")
-        if len(parts) >= 2:
-            try:
-                idx = int(parts[1]) - 1
-                if 0 <= idx < len(all_urls):
-                    small_files.append((fname, fpath, all_urls[idx]))
-            except ValueError:
-                pass
+        # 解析序号：取文件名里的最后一组 4 位数字
+        m = re.search(r"(\d{4})(?=\.[a-zA-Z]+$)", fname)
+        if not m:
+            continue
+        try:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(urls):
+                small_files.append((fname, fpath, urls[idx]))
+        except ValueError:
+            pass
 
     if not small_files:
-        log("没有需要升级的小图")
         return 0
 
-    log(f"发现 {len(small_files)} 张小图，尝试高清化...")
+    log(f"发现 {len(small_files)} 张可能为缩略图，尝试补救式高清化...")
     upgraded = 0
-
-    for fname, fpath, original_url in small_files:
-        current_size = os.path.getsize(fpath)
-        best_data = None
-        best_size = current_size
-
-        # 构建候选URL列表
-        candidates = []
-        for old_seg in ['/originals/', '/736x/', '/564x/', '/474x/', '/236x/']:
-            if old_seg in original_url:
-                for new_seg in ['/originals/', '/736x/', '/564x/', '/474x/']:
-                    cand = original_url.replace(old_seg, new_seg)
-                    if cand != original_url:
-                        candidates.append(cand)
-                candidates.insert(0, original_url)  # 原始URL也加入候选
-                break
-
-        for var_url in candidates[:7]:
+    for fname, fpath, url in small_files:
+        cur_sz = os.path.getsize(fpath)
+        best = None
+        best_sz = cur_sz
+        for v in _build_variant_urls(url)[:5]:
             try:
-                req = urllib.request.Request(var_url, headers={
-                    'User-Agent': USER_AGENT,
-                    'Referer': 'https://www.pinterest.com/',
+                req = urllib.request.Request(v, headers={
+                    "User-Agent": pick_ua(),
+                    "Referer": "https://www.pinterest.com/",
                 })
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     data = resp.read()
-                    if data and len(data) > best_size:
-                        best_data = data
-                        best_size = len(data)
+                    if data and len(data) > best_sz * 1.15:
+                        best = data
+                        best_sz = len(data)
             except Exception:
                 continue
-
-        # 新版本必须明显更大才替换（至少大20%）
-        if best_data and best_size > current_size * 1.2:
+        if best:
             with open(fpath, "wb") as f:
-                f.write(best_data)
+                f.write(best)
             upgraded += 1
             if upgraded <= 10 or upgraded % 20 == 0:
-                log(f"  ↑ {fname}: {current_size//1024}KB → {best_size//1024}KB")
-
-    log(f"高清化完成: {upgraded}/{len(small_files)} 张已升级")
+                log(f"  ↑ {fname}: {cur_sz//1024}KB → {best_sz//1024}KB")
+    log(f"高清化补救: {upgraded}/{len(small_files)} 张已升级")
     return upgraded
 
 
 # ================================================================
-# 内部工具函数
+# 内部工具
 # ================================================================
 
-def _save_cache(filepath: str, lines: list):
-    """将列表写入缓存文件（每行一项）"""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+def _save_cache(filepath: str, lines):
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
     with open(filepath, "w") as f:
         for item in lines:
             f.write(str(item) + "\n")
 
 
 def _guess_ext(url: str) -> str:
-    """根据URL推断图片扩展名"""
-    lower = url.lower()
-    if '.png' in lower: return '.png'
-    if '.gif' in lower: return '.gif'
-    if '.webp' in lower: return '.webp'
-    return '.jpg'
+    lower = url.lower().split("?")[0]
+    for ext in (".png", ".gif", ".webp", ".jpg", ".jpeg"):
+        if lower.endswith(ext):
+            return ".jpg" if ext == ".jpeg" else ext
+    return ".jpg"
 
 
-def _try_download(url: str, save_path: str, idx: int, extra_headers=None, timeout=IMAGE_TIMEOUT) -> bool:
-    """
-    尝试用urllib下载单个文件。
-    返回 True 表示成功。
-    """
-    headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+def _sync_download(url: str, save_path: str, extra_headers=None,
+                   timeout=30, retries=1, cookie_header: str = "") -> bool:
+    headers = {"User-Agent": pick_ua(), "Accept": "*/*"}
     if extra_headers:
         headers.update(extra_headers)
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-            if len(data) >= 512:  # 最小512字节才认为有效
-                with open(save_path, "wb") as f:
-                    f.write(data)
-                log(f"  ✓ [{idx}] {os.path.basename(save_path)} ({len(data)//1024}KB)")
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def _try_variants(original_url: str, save_path: str, idx: int) -> bool:
-    """
-    当原始URL下载失败时，尝试CDN的其他尺寸变体。
-    Pinterest CDN通过URL中的尺寸标识区分分辨率。
-    """
-    size_segments = ['/originals/', '/736x/', '/564x/', '/474x/', '/236x/']
-    variants = []
-
-    for seg in size_segments:
-        if seg in original_url:
-            for alt in ['736x', '564x', '474x', '236x', 'originals']:
-                var_url = original_url.replace(seg, '/' + alt + '/')
-                if var_url != original_url:
-                    variants.append(var_url)
-            break
-
-    for var_url in variants:
-        if _try_download(var_url, save_path, idx):
-            return True
-
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+                if len(data) >= 512:
+                    with open(save_path, "wb") as f:
+                        f.write(data)
+                    return True
+            return False
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(1.5 * (2 ** attempt) + random.uniform(0, 0.5))
     return False
 
 
 # ================================================================
-# 主入口
+# CLI 入口
 # ================================================================
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Pinterest Board Downloader v3.0 —— 一键下载画板图片+视频",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python3 pinterest_download.py https://www.pinterest.com/user/board/
+  python3 pinterest_download.py https://www.pinterest.com/user/board/ --output ./out --concurrency 10
+  python3 pinterest_download.py https://www.pinterest.com/user/board/ --cookies cookies.txt --name-by pin
+
+环境变量兼容：
+  若只提供两个位置参数 (URL  OUTPUT_DIR)，将沿用旧版行为。
+        """,
+    )
+    parser.add_argument("board_url", help="Pinterest 画板 URL")
+    parser.add_argument("output_positional", nargs="?", default=None,
+                        help="（兼容旧版）输出目录")
+    parser.add_argument("--output", "-o", default=None, help="输出目录（覆盖位置参数）")
+    parser.add_argument("--concurrency", type=int, default=DEFAULTS["image_concurrency"],
+                        help=f"图片并发数（默认 {DEFAULTS['image_concurrency']}）")
+    parser.add_argument("--retries", type=int, default=DEFAULTS["image_retries"],
+                        help="单张图片最大重试次数")
+    parser.add_argument("--max-pins", type=int, default=0,
+                        help="限制最多处理的 Pin 数量（0=不限）")
+    parser.add_argument("--cookies", default=None,
+                        help="Netscape 格式 cookies.txt（访问私密画板时使用）")
+    parser.add_argument("--name-by", choices=["seq", "pin"], default="seq",
+                        help="文件命名：seq=序号（默认），pin=包含 Pin ID")
+    parser.add_argument("--no-video", action="store_true", help="跳过视频检测与下载")
+    parser.add_argument("--scroll-pause", type=float, default=DEFAULTS["scroll_pause"],
+                        help="每次滚动后的等待秒数")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser.parse_args()
+
+
 async def main():
-    # ---- 解析参数 ----
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+    args = parse_args()
 
-    board_url = sys.argv[1].strip().rstrip("/")
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
-
+    board_url = args.board_url.strip().rstrip("/")
     if "pinterest.com" not in board_url.lower():
         log("❌ 请提供有效的 Pinterest 画板 URL")
         sys.exit(1)
 
-    # 确定输出目录
+    output_dir = args.output or args.output_positional
     if not output_dir:
         board_name = board_url.rstrip("/").split("/")[-1] or "board"
         output_dir = os.path.join(os.getcwd(), f"pinterest_{board_name}")
-
     os.makedirs(output_dir, exist_ok=True)
 
-    # ---- 打印信息 ----
-    print(f"\n{'='*60}")
-    print(f"  🎨 Pinterest Board Downloader v2.0")
-    print(f"{'='*60}")
-    print(f"  📍 画板:  {board_url}")
-    print(f"  📂 输出:  {output_dir}")
-    print(f"{'='*60}\n")
+    # 组合 cfg
+    cfg = dict(DEFAULTS)
+    cfg["image_concurrency"] = max(1, args.concurrency)
+    cfg["image_retries"] = max(1, args.retries)
+    cfg["scroll_pause"] = args.scroll_pause
 
-    # ====== Phase 1: 收集 ======
+    # Cookie
+    jar, pw_cookies = load_cookies(args.cookies)
+    cfg["_pw_cookies"] = pw_cookies
+    cfg["_cookie_header"] = cookie_header_from_jar(jar)
+
+    print(f"\n{'='*64}")
+    print(f"  🎨 Pinterest Board Downloader v{__version__}")
+    print(f"{'='*64}")
+    print(f"  📍 画板:   {board_url}")
+    print(f"  📂 输出:   {output_dir}")
+    print(f"  ⚙️  并发:   {cfg['image_concurrency']} | 重试 {cfg['image_retries']} | 命名 {args.name_by}")
+    if args.cookies:
+        print(f"  🔐 Cookie: {args.cookies}")
+    if args.max_pins:
+        print(f"  🔢 限制:   最多 {args.max_pins} 个 Pin")
+    if args.no_video:
+        print(f"  🎬 视频:   已跳过")
+    print(f"{'='*64}\n")
+
+    # Phase 1
     log("📋 [1/5] 滚动画板收集数据...")
-    image_urls, pin_ids = await collect_board_data(board_url, output_dir)
-    if not image_urls:
-        log("⚠️ 未收集到任何图片。可能原因：需要登录 / URL无效 / 网络问题")
-        # 仍然继续执行后续阶段（可能有缓存数据）
+    image_records, pin_ids = await collect_board_data(board_url, output_dir, cfg)
 
-    # ====== Phase 2: 视频检测 ======
-    log(f"\n🎬 [2/5] 检测视频Pin ({len(pin_ids)}个)...")
-    video_results = await detect_video_pins(pin_ids, output_dir) if pin_ids else []
+    if args.max_pins > 0:
+        image_records = image_records[: args.max_pins]
+        pin_ids = pin_ids[: args.max_pins]
+        log(f"已按 --max-pins 截断到 {args.max_pins}")
 
-    # ====== Phase 3: 下载图片 ======
-    log(f"\n🖼️ [3/5] 下载图片 ({len(image_urls)}张)...")
-    img_s, img_f = download_images(image_urls, output_dir)
+    if not image_records and not pin_ids:
+        log("⚠️ 未收集到任何内容。可能原因：")
+        log("    · 画板需要登录 → 使用 --cookies 传入 cookies.txt")
+        log("    · 画板 URL 错误 / 画板被删除")
+        log("    · 网络/地域限制 → 检查是否能正常访问 pinterest.com")
+        sys.exit(2)
 
-    # ====== Phase 4: 下载视频 ======
+    # Phase 2
+    if args.no_video:
+        video_results = []
+        log("\n🎬 [2/5] 已跳过视频检测（--no-video）")
+    else:
+        log(f"\n🎬 [2/5] 检测视频 Pin（{len(pin_ids)} 个）...")
+        video_results = await detect_video_pins(pin_ids, output_dir, cfg)
+
+    # Phase 3
+    log(f"\n🖼️ [3/5] 下载图片（{len(image_records)} 张）...")
+    img_s, img_f = await download_images_async(image_records, output_dir, cfg, args.name_by)
+
+    # Phase 4
     if video_results:
-        log(f"\n🎥 [4/5] 下载视频 ({len(video_results)}个)...")
-        vid_s, vid_f = download_videos(video_results, output_dir)
+        log(f"\n🎥 [4/5] 下载视频（{len(video_results)} 个）...")
+        vid_s, vid_f = download_videos(video_results, output_dir, cfg)
     else:
         log("\n🎥 [4/5] 无视频，跳过")
         vid_s = vid_f = 0
 
-    # ====== Phase 5: 高清化 ======
-    log(f"\n🔍 [5/5] 小图高清化升级...")
-    upgraded = upgrade_small_images(output_dir)
+    # Phase 5
+    log(f"\n🔍 [5/5] 补救式高清化...")
+    upgraded = upgrade_small_images(output_dir, cfg)
 
-    # ---- 最终报告 ----
+    # 汇总
     total_files = img_s + vid_s
-    total_size_kb = sum(
-        os.path.getsize(os.path.join(dp, f))
-        for dp, _, fns in os.walk(output_dir)
-        for f in fns if not f.startswith("_")
-    ) if os.path.isdir(output_dir) else 0
+    total_bytes = 0
+    if os.path.isdir(output_dir):
+        for dp, _, fns in os.walk(output_dir):
+            for f in fns:
+                if f.startswith("_"):
+                    continue
+                try:
+                    total_bytes += os.path.getsize(os.path.join(dp, f))
+                except OSError:
+                    pass
 
-    print(f"\n{'='*60}")
+    print(f"\n{'='*64}")
     print(f"  ✅ 全部完成!")
-    print(f"{'='*60}")
+    print(f"{'='*64}")
     print(f"  📂 目录:   {output_dir}")
     print(f"  🖼️ 图片:   {img_s} 成功, {img_f} 失败")
     if video_results:
         print(f"  🎬 视频:   {vid_s} 成功, {vid_f} 失败")
-    if upgraded > 0:
+    if upgraded:
         print(f"  ⬆️ 升级:   {upgraded} 张小图已高清化")
-    print(f"  📦 总计:   {total_files} 文件, {total_size_kb / 1024:.1f} MB")
+    print(f"  📦 总计:   {total_files} 文件, {total_bytes / 1024 / 1024:.1f} MB")
+    print(f"{'='*64}\n")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log("\n⏹️ 用户中断。已下载文件保留在输出目录，重跑会自动断点续传。")
+        sys.exit(130)

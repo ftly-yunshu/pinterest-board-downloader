@@ -1,55 +1,207 @@
-# 📌 Pinterest Board Downloader Skill
+# 📌 Pinterest Board Downloader
 
 <p align="center">
-  <strong>一键下载 Pinterest 画板中的全部图片和视频</strong><br>
-  <sub>npx Skills 标准格式 · AI 原生 · 图片 + 视频 + 高清化升级</sub>
+  <strong>一键下载 Pinterest 画板中的全部图片和视频到本地</strong><br>
+  <sub>原图优先 · 并发+重试 · 视频支持 · 私密画板 · 断点续传</sub>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/npx%20skills-add-ready-blue" alt="npx skills" />
+  <img src="https://img.shields.io/badge/version-3.0.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python" />
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" />
+  <img src="https://img.shields.io/badge/npx%20skills-compatible-orange" alt="npx skills" />
 </p>
 
 ---
 
-## 🚀 安装
+## ✨ 为什么选这个（常见 Pinterest 下载器的痛点对比）
+
+社区里大量 Pinterest 下载器存在如下缺陷 —— 本工具针对性逐项修复：
+
+| 常见痛点 | 其他工具表现 | 本工具 v3.0 |
+|----------|-------------|-------------|
+| **只下缩略图** | 下载到 236x 小图，清晰度差 | ✅ DOM 阶段读 `srcset` 最大项；下载阶段按 `/originals/ → /1200x/ → /736x/` 顺序尝试 |
+| **不处理无限滚动** | 只抓首屏可见的几十张 | ✅ Playwright 自动滚动，stagnant 检测到底停止（默认最多 800 次滚动） |
+| **失败不重试** | 一次超时就放弃 | ✅ 每张图 **3 次指数退避重试**，专门处理 429/503 限流 |
+| **串行下载慢** | 500 张要跑 10+ 分钟 | ✅ **aiohttp 并发下载**（默认 8，可调），500 张约 1-2 分钟 |
+| **重跑会重复下载** | 无去重逻辑 | ✅ 持久化 `_manifest.txt`，**断点续传**，重跑秒跳过 |
+| **不支持私密画板** | 只能下公开画板 | ✅ `--cookies cookies.txt` 支持 Netscape 格式 |
+| **要求输入账号密码** | 第三方工具常见，极大安全隐患 | ✅ **永不索取密码**，仅支持 cookie |
+| **视频完全不下载** | 画板里的 Idea Pin / 视频直接跳过 | ✅ 并发检测 + MP4 直链下载；HLS (m3u8) 导出清单供 ffmpeg |
+| **反爬应对不足** | 固定 UA、固定间隔，容易被限 | ✅ UA 轮换、滚动抖动、请求间隔抖动 |
+| **CDN 改版即失效** | 依赖易变的 CSS selector | ✅ 用 `a[href*="/pin/"] > img` 结构选择器，稳定性较好 |
+
+---
+
+## 🚀 安装（3 种方式）
+
+### ① 作为 AI Skill 安装（推荐）
+
+通过 `npx skills` 安装到任意兼容的 AI Agent（WorkBuddy / CodeBuddy / Cline / Cursor / Codex / Copilot 等）：
 
 ```bash
-npx skills add https://github.com/ftly-yunshu/pinterest-board-downloader --skill pinterest-downloader
+npx skills add https://github.com/ftly-yunshu/pinterest-board-downloader --skill pinterest-downloader -y
 ```
 
-安装后，任何 AI 助手（WorkBuddy / CodeBuddy / 兼容的 Agent 框架）都能自动识别并使用此技能。
+安装完成后，直接对 AI 说：
 
-## 📖 使用方法
+> 帮我下载这个 Pinterest 画板：`https://www.pinterest.com/<user>/<board>/`
 
-安装后，用户只需说：
+AI 会自动识别并调用本 Skill。
 
-> **"帮我下载这个 Pinterest 画板的所有图片：`https://www.pinterest.com/user/board-name/`"**
-
-AI 会自动：
-1. 识别触发词 → 加载此 Skill
-2. 安装依赖（playwright + aiohttp）
-3. 执行下载脚本 → 完成全量采集
-4. 报告结果（图片数、视频数、文件大小）
-
-### 手动运行（不通过 AI）
+### ② 纯命令行使用
 
 ```bash
+git clone https://github.com/ftly-yunshu/pinterest-board-downloader.git
+cd pinterest-board-downloader
+
 pip install playwright aiohttp
 playwright install chromium
 
-python3 skills/pinterest-downloader/scripts/pinterest_download.py https://www.pinterest.com/user/board-name/
+python3 scripts/pinterest_download.py https://www.pinterest.com/user/board/
 ```
 
-## ✨ 功能特性
+### ③ 单文件下载（无需克隆）
 
-| 功能 | 说明 |
-|------|------|
-| 🖼️ **全量图片采集** | 自动滚动加载画板，提取所有 CDN 图片 URL |
-| 🎬 **视频检测+下载** | 并发扫描 Pin 发现视频，优先下载 MP4 直链 |
-| 🔍 **高清化升级** | 自动将小尺寸缩略图替换为高分辨率版本 |
-| ⏭️ **断点续传** | 已下载文件自动跳过，支持中断后重跑 |
+```bash
+curl -O https://raw.githubusercontent.com/ftly-yunshu/pinterest-board-downloader/main/scripts/pinterest_download.py
+pip install playwright aiohttp && playwright install chromium
+python3 pinterest_download.py <URL>
+```
+
+---
+
+## 📖 用法速查
+
+```bash
+# 基础：下载公开画板
+python3 pinterest_download.py https://www.pinterest.com/user/board/
+
+# 指定输出目录 + 并发数
+python3 pinterest_download.py <URL> --output ./my_images --concurrency 12
+
+# 只想先试 50 张
+python3 pinterest_download.py <URL> --max-pins 50
+
+# 私密画板：先用浏览器扩展导出 cookies.txt
+python3 pinterest_download.py <URL> --cookies cookies.txt
+
+# 温和模式（网络差或怕被限流时）
+python3 pinterest_download.py <URL> --concurrency 3 --scroll-pause 2.5
+
+# 用 Pin ID 命名文件 + 跳过视频
+python3 pinterest_download.py <URL> --name-by pin --no-video
+
+# 查看所有参数
+python3 pinterest_download.py --help
+```
+
+---
+
+## ⚙️ 参数详解
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `board_url` | — | Pinterest 画板 URL（必填） |
+| `--output / -o` | `pinterest_{board}/` | 输出目录 |
+| `--concurrency` | `8` | 图片并发下载数 |
+| `--retries` | `3` | 每张图片最大重试次数（指数退避） |
+| `--max-pins` | `0` | 最多处理的 Pin 数量，0 = 不限 |
+| `--cookies` | — | Netscape 格式 cookies.txt（私密画板用） |
+| `--name-by` | `seq` | 文件命名：`seq` 纯序号 / `pin` 含 Pin ID |
+| `--no-video` | — | 跳过视频检测与下载 |
+| `--scroll-pause` | `1.5` | 每次滚动后等待秒数 |
+
+---
+
+## 📂 输出结构
+
+```
+output_dir/
+├── pinterest_0001.jpg            # 或 pin_{pinid}_0001.jpg
+├── pinterest_0002.jpg
+├── ...
+├── videos/
+│   └── video_001_{pinid}.mp4     # MP4 视频
+├── videos_hls/
+│   └── m3u8_list.txt             # HLS 流清单（需 ffmpeg 处理）
+├── _urls_cache.txt               # 采集到的 URL（含 pin_id）
+├── _pins_cache.txt               # 所有 Pin ID
+├── _video_list.txt               # 视频检测结果
+└── _manifest.txt                 # 已下载清单（断点续传依据，勿删）
+```
+
+---
+
+## 🔒 安全与隐私
+
+**本工具的安全承诺**：
+
+- ❌ **永不请求**你的 Pinterest 账号或密码
+- ❌ **不发送任何数据**到第三方服务器
+- ✅ 所有操作均在**本地**完成（除了必要的 Pinterest CDN 请求）
+- ✅ 私密画板仅通过**用户主动提供**的 `cookies.txt` 访问
+- ✅ Cookie 文件**始终保留在用户本地**，脚本不会上传
+
+### 如何安全地导出 Cookies（访问私密画板）
+
+1. 在 Chrome/Firefox 安装可信的扩展（如开源的 **Get cookies.txt LOCALLY**）
+2. 登录 `https://www.pinterest.com/`
+3. 点击扩展 → **Export for pinterest.com** → 保存为 `cookies.txt`
+4. 传给脚本：`--cookies /path/to/cookies.txt`
+
+> ⚠️ **切勿**在非官方网页输入 Pinterest 账号密码。
+
+---
+
+## ⚖️ 使用条款与法律声明
+
+请仔细阅读：
+
+- 下载的素材**版权归原作者所有**
+- 本工具仅供**个人离线备份、学习研究**使用
+- 禁止用于大规模二次传播、商业再分发、模型训练（未经授权）
+- 请遵守 [Pinterest Terms of Service](https://policy.pinterest.com/en/terms-of-service) 及所在国家/地区的版权法律
+- 作者不对使用本工具产生的任何纠纷负责
+
+---
+
+## 🔧 工作原理
+
+5 阶段流水线：
+
+| 阶段 | 技术 | 作用 |
+|------|------|------|
+| **1. 滚动收集** | Playwright + Chromium | 自动滚动画板，从 `srcset` 读取高清 URL + 采集 Pin ID |
+| **2. 视频检测** | aiohttp 并发 HTTP GET | 对每个 Pin 页面做正则匹配 MP4/m3u8（比浏览器逐个打开快约 100 倍） |
+| **3. 图片下载** | aiohttp 并发 + 指数退避 | 按 `/originals/ → /1200x/ → /736x/` 顺序尝试，自动处理 429/503 |
+| **4. 视频下载** | urllib + Referer 头 | MP4 直链保存到 `videos/`；HLS 输出清单供 ffmpeg |
+| **5. 高清化补救** | URL 尺寸段替换 | 扫描仍 < 15KB 的图片，尝试更大尺寸覆盖 |
+
+---
+
+## 🧪 如何验证下载质量
+
+运行后用这三步自检：
+
+1. **查原图**：随机打开一张 JPG，查分辨率。常见原图应在 1000px 宽以上（具体取决于源图）
+2. **查数量**：对比 Pinterest 网页上画板的显示数量（画板头部有计数）
+3. **查完整性**：若 `_manifest.txt` 行数 ≈ `_urls_cache.txt` 行数，说明基本无遗漏
+
+---
+
+## 🛠️ 故障排查
+
+| 症状 | 可能原因 | 解决方案 |
+|------|---------|---------|
+| 收集到 0 张图片 | 画板需登录 / URL 错误 / 网络限制 | 检查 URL；提供 `--cookies`；换网络环境 |
+| HTTP 429 / 503 大量出现 | 并发太激进 | `--concurrency 3 --scroll-pause 3` |
+| 图片下载后大量 < 10KB | CDN 返回了缩略图 | 脚本阶段 5 会自动补救；极端情况下该 Pin 的源图本身就小 |
+| 视频检测为 0 但画板有视频 | 全是 HLS 流 | 查 `videos_hls/m3u8_list.txt`，用 `ffmpeg -i <URL> -c copy out.mp4` |
+| `playwright install` 失败 | 系统 Python 受保护 | 用 venv 或 `pip install --break-system-packages playwright` |
+| 中断后再跑是否会重复下载 | — | 不会；`_manifest.txt` 会跳过已完成的 URL |
+
+---
 
 ## 📁 仓库结构
 
@@ -57,37 +209,35 @@ python3 skills/pinterest-downloader/scripts/pinterest_download.py https://www.pi
 pinterest-board-downloader/
 ├── skills/
 │   └── pinterest-downloader/
-│       ├── SKILL.md                    # 技能定义（触发词 + 工作流程）
-│       └── scripts/
-│           └── pinterest_download.py   # 核心下载脚本
-├── README.md                           # 本文件
-├── LICENSE                             # MIT 协议
-├── requirements.txt                    # Python 依赖
+│       ├── SKILL.md                 # Skill 定义（供 AI 读取）
+│       └── pinterest_download.py    # 核心脚本
+├── scripts/
+│   └── pinterest_download.py        # 同文件副本（供纯 CLI 用户）
+├── README.md                        # 本文件
+├── LICENSE                          # MIT
+├── requirements.txt                 # Python 依赖
 └── .gitignore
 ```
 
-## 🔧 工作原理
+---
 
-| 阶段 | 技术 | 说明 |
-|------|------|------|
-| 数据收集 | Playwright + Chromium | 浏览器自动化滚动加载 |
-| 视频检测 | aiohttp 并发 HTTP | ~100x 比浏览器逐个打开快 |
-| 图片下载 | urllib + CDN 变体回退 | originals→736x→564x→474x |
-| 视频下载 | urllib MP4 直连 | 保存到 videos/ 子目录 |
-| 高清化 | CDN 尺寸替换 | 自动升级小图到高分辨率 |
+## 🤝 贡献
 
-## ⚠️ 注意事项
+欢迎 PR 与 issue，特别欢迎：
 
-- 私密画板可能需要登录才能访问
-- 通常能获取 95%-98% 的 Pins
-- 内置礼貌延迟避免被封 IP
+- 针对 Pinterest DOM 改版的兼容性修复
+- 更稳健的 HLS 下载方案（内置 m3u8 合并）
+- 其他语言（英语）文档
+
+---
 
 ## 📄 License
 
-MIT — 自由使用、修改和分发。
+MIT © [ftly-yunshu](https://github.com/ftly-yunshu) — 自由使用、修改和分发。
 
 ---
 
 <p align="center">
-  安装命令：<code>npx skills add https://github.com/ftly-yunshu/pinterest-board-downloader --skill pinterest-downloader</code>
+  作为 AI Skill 安装：<br>
+  <code>npx skills add https://github.com/ftly-yunshu/pinterest-board-downloader --skill pinterest-downloader -y</code>
 </p>
