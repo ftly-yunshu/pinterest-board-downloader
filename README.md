@@ -50,17 +50,14 @@ pip3 install playwright aiohttp
 
 > 如果报 `Permission denied`，改为：`pip3 install playwright aiohttp --break-system-packages`
 
-**第 3 步：安装浏览器内核（只需运行一次）**
-```bash
-python3 -m playwright install chromium
-```
-
-**第 4 步：开始下载！**
+**第 3 步：开始下载！**
 ```bash
 python3 ~/Desktop/pinterest_download.py "https://www.pinterest.com/用户名/画板名/" --output ~/Desktop/Pinterest下载
 ```
 
 下载完成后，在桌面找到 `Pinterest下载` 文件夹即可。
+
+> 💡 脚本会自动使用系统已安装的 Chrome / Edge 浏览器，**无需额外安装浏览器内核**。
 
 ---
 
@@ -82,17 +79,14 @@ pip install playwright aiohttp
 >
 > 如果报 `Permission denied` → 以**管理员身份**重新打开 PowerShell 再运行。
 
-**第 3 步：安装浏览器内核（只需运行一次）**
-```powershell
-python -m playwright install chromium
-```
-
-**第 4 步：开始下载！**
+**第 3 步：开始下载！**
 ```powershell
 python "%USERPROFILE%\Desktop\pinterest_download.py" "https://www.pinterest.com/用户名/画板名/" --output "%USERPROFILE%\Desktop\Pinterest下载"
 ```
 
 下载完成后，在桌面找到 `Pinterest下载` 文件夹即可。
+
+> 💡 Windows 10/11 自带 Edge 浏览器，脚本会自动使用，**无需额外安装浏览器内核**。
 
 ---
 
@@ -160,7 +154,7 @@ python3 pinterest_download.py --help
 | HTTP 403 大量出现 | 脚本已自动退避重试；若持续请稍后再试 |
 | 图片下载后大量很模糊 | 脚本会自动尝试高清补救；极端情况源图本身就小 |
 | 视频检测为 0 但画板有视频 | 查 `videos_hls/m3u8_list.txt`，用 ffmpeg 下载 |
-| `playwright install` 失败 | macOS: 加 `--break-system-packages`；Windows: 用管理员 PowerShell |
+| `playwright install` 失败 | 脚本已自动使用系统浏览器，一般不需要此步骤 |
 | Windows PermissionError | `--output "%USERPROFILE%\Desktop\Pinterest下载"` |
 
 ---

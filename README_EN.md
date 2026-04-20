@@ -50,17 +50,14 @@ pip3 install playwright aiohttp
 
 > If you get `Permission denied`, use: `pip3 install playwright aiohttp --break-system-packages`
 
-**Step 3: Install browser engine (run once)**
-```bash
-python3 -m playwright install chromium
-```
-
-**Step 4: Start downloading!**
+**Step 3: Start downloading!**
 ```bash
 python3 ~/Desktop/pinterest_download.py "https://www.pinterest.com/username/board-name/" --output ~/Desktop/Pinterest
 ```
 
 Find the downloaded files in the `Pinterest` folder on your Desktop.
+
+> 💡 The script auto-detects your system Chrome / Edge browser — **no extra browser installation needed**.
 
 ---
 
@@ -82,17 +79,14 @@ pip install playwright aiohttp
 >
 > If you get `Permission denied` → Reopen PowerShell as **Administrator**.
 
-**Step 3: Install browser engine (run once)**
-```powershell
-python -m playwright install chromium
-```
-
-**Step 4: Start downloading!**
+**Step 3: Start downloading!**
 ```powershell
 python "%USERPROFILE%\Desktop\pinterest_download.py" "https://www.pinterest.com/username/board-name/" --output "%USERPROFILE%\Desktop\Pinterest"
 ```
 
 Find the downloaded files in the `Pinterest` folder on your Desktop.
+
+> 💡 Windows 10/11 comes with Edge pre-installed — the script uses it automatically, **no extra browser installation needed**.
 
 ---
 
@@ -160,7 +154,7 @@ python3 pinterest_download.py --help
 | Frequent HTTP 403 errors | Auto-retries are built in; wait and retry if persistent |
 | Downloaded images are blurry | Auto upscaling is attempted; source may be low-res |
 | Videos detected as 0 but board has videos | Check `videos_hls/m3u8_list.txt`, use ffmpeg |
-| `playwright install` fails | macOS: add `--break-system-packages`; Windows: use Admin PowerShell |
+| `playwright install` fails | Script auto-detects system browser, this step is usually not needed |
 | Windows PermissionError | Use `--output "%USERPROFILE%\Desktop\Pinterest"` |
 
 ---
