@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/env/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output data (downloaded images/videos)
+pinterest_*/
+!pinterest_*/.gitkeep
+
+# Cache files
+_urls_cache.txt
+_pins_cache.txt
+_video_list.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
