@@ -122,10 +122,10 @@ def load_cookies(cookies_path: str):
                 "httpOnly": False,
                 "sameSite": "Lax",
             })
-        log(f"🔐 已加载 {len(pw_cookies)} 条 Pinterest cookies")
+        log(f"[cookie] 已加载 {len(pw_cookies)} 条 Pinterest cookies")
         return jar, pw_cookies
     except Exception as e:
-        log(f"⚠️ 加载 cookies 失败: {e}，将以匿名模式继续")
+        log(f"[警告] 加载 cookies 失败: {e}，将以匿名模式继续")
         return None, None
 
 
@@ -157,7 +157,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
     urls_cache = os.path.join(output_dir, "_urls_cache.txt")
     pins_cache = os.path.join(output_dir, "_pins_cache.txt")
     if resume and os.path.exists(urls_cache) and os.path.exists(pins_cache):
-        log("⏩ --resume 模式：读取本地缓存，跳过滚动阶段")
+        log("--resume 模式: 读取本地缓存，跳过滚动阶段")
         image_records = []
         with open(urls_cache) as f:
             for line in f:
@@ -171,12 +171,12 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
         pin_ids = []
         with open(pins_cache) as f:
             pin_ids = [l.strip() for l in f if l.strip()]
-        log(f"✅ 从缓存恢复: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
+        log(f"[完成] 从缓存恢复: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
         return image_records, pin_ids
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        log("❌ 缺少依赖: pip install playwright && playwright install chromium")
+        log("[错误] 缺少依赖: pip install playwright && playwright install chromium")
         sys.exit(1)
 
     image_records = []  # [(pin_id_or_none, original_url), ...] 保留顺序与出现关系
@@ -220,14 +220,14 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
     browser = None
     if channel:
         try:
-            log(f"  ✓ 检测到系统浏览器（{channel}），直接使用")
+            log(f"  ok 检测到系统浏览器（{channel}），直接使用")
             browser = await p.chromium.launch(
                 headless=True, channel=channel,
                 args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
                       "--disable-blink-features=AutomationControlled"],
             )
         except Exception as e:
-            log(f"  ⚠ 系统 {channel} 启动失败（{e}），回退到 Playwright Chromium")
+            log(f"  [警告] 系统 {channel} 启动失败（{e}），回退到 Playwright Chromium")
 
     if browser is None:
         try:
@@ -237,8 +237,8 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
                       "--disable-blink-features=AutomationControlled"],
             )
         except Exception as e:
-            log("  ✗ 未检测到系统浏览器，Playwright Chromium 也未安装")
-            log("  💡 请先安装 Google Chrome 或运行以下命令：")
+            log("  x 未检测到系统浏览器，Playwright Chromium 也未安装")
+            log("  [提示] 请先安装 Google Chrome 或运行以下命令：")
             log("     python3 -m playwright install chromium")
             await p.stop()
             raise SystemExit(1)
@@ -254,7 +254,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
         try:
             await ctx.add_cookies(pw_cookies)
         except Exception as e:
-            log(f"⚠️ 注入 cookies 失败: {e}")
+            log(f"[警告] 注入 cookies 失败: {e}")
 
     page = await ctx.new_page()
     page.set_default_timeout(60000)
@@ -263,7 +263,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
         log(f"正在打开: {board_url}")
         resp = await page.goto(board_url, wait_until="domcontentloaded", timeout=30000)
         if resp and resp.status >= 400:
-            log(f"⚠️ 页面返回状态码 {resp.status}；如是 403/404 请检查画板链接或登录态")
+            log(f"[警告] 页面返回状态码 {resp.status}；如是 403/404 请检查画板链接或登录态")
 
         # 等待 network 相对稳定 + 一些内容渲染
         try:
@@ -395,7 +395,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
             # 智能 Pin 数量上限检测
             # 如果图片数远超 Pin 数，说明 Pinterest 注入了推荐内容，提前停止
             if len(pin_ids) > 0 and total > len(pin_ids) * 1.3:
-                log(f"  ⚠️ 图片数({total})明显超过 Pin 数({len(pin_ids)})，")
+                log(f"  [警告] 图片数({total})明显超过 Pin 数({len(pin_ids)})，")
                 log(f"     可能进入了 Pinterest 推荐区域，提前停止滚动")
                 break
 
@@ -408,7 +408,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
                     [f"{pid or '-'}\t{u}\t{og}" for pid, u, og in image_records])
         _save_cache(os.path.join(output_dir, "_pins_cache.txt"), pin_ids)
 
-        log(f"✅ 收集完成: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
+        log(f"[完成] 收集: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
     finally:
         await browser.close()
         await p.stop()
@@ -424,7 +424,7 @@ async def detect_video_pins(pin_ids, output_dir: str, cfg: dict):
     try:
         import aiohttp
     except ImportError:
-        log("⚠️ 缺少 aiohttp，跳过视频检测。pip install aiohttp")
+        log("[警告] 缺少 aiohttp，跳过视频检测。pip install aiohttp")
         return []
 
     if not pin_ids:
@@ -487,7 +487,7 @@ async def detect_video_pins(pin_ids, output_dir: str, cfg: dict):
         for pid, vurl, vtype in video_results:
             f.write(f"{pid}\t{vtype}\t{vurl}\n")
 
-    log(f"✅ 视频检测完成: {len(video_results)} 个")
+    log(f"[完成] 视频检测: {len(video_results)} 个")
     mp4_cnt = sum(1 for _, _, t in video_results if t == "mp4")
     hls_cnt = sum(1 for _, _, t in video_results if t == "m3u8")
     if hls_cnt:
@@ -537,7 +537,7 @@ async def download_images_async(image_records, output_dir: str, cfg: dict, name_
     try:
         import aiohttp
     except ImportError:
-        log("❌ 需要 aiohttp: pip install aiohttp")
+        log("[错误] 需要 aiohttp: pip install aiohttp")
         sys.exit(1)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -654,10 +654,10 @@ async def download_images_async(image_records, output_dir: str, cfg: dict, name_
                 success += 1
                 if success <= 3 or success % 50 == 0:
                     sz = os.path.getsize(save_path)
-                    log(f"  ✓ [{idx}] {filename} ({sz//1024}KB)")
+                    log(f"  ok [{idx}] {filename} ({sz//1024}KB)")
             else:
                 fail += 1
-                log(f"  ✗ [{idx}] {original_url[:70]} - {last_err}")
+                log(f"  x [{idx}] {original_url[:70]} - {last_err}")
         # 礼貌延迟（抖动）
         await asyncio.sleep(random.uniform(0.05, 0.2))
 
@@ -670,7 +670,7 @@ async def download_images_async(image_records, output_dir: str, cfg: dict, name_
         ]
         await asyncio.gather(*tasks)
 
-    log(f"\n图片结果: ✓{success} ✗{fail} ⊘{skipped}")
+    log(f"\n图片结果: ok{success} x{fail} -{skipped}")
     return success, fail
 
 
@@ -700,7 +700,7 @@ def download_videos(video_results, output_dir: str, cfg: dict):
         filename = f"video_{idx:03d}_{pin_id}.mp4"
         save_path = os.path.join(videos_dir, filename)
         if os.path.exists(save_path) and os.path.getsize(save_path) > 1024:
-            log(f"  ⊘ [{idx}] 已存在: {filename}")
+            log(f"  - [{idx}] 已存在: {filename}")
             success += 1
             continue
 
@@ -712,14 +712,14 @@ def download_videos(video_results, output_dir: str, cfg: dict):
             cookie_header=cfg.get("_cookie_header", ""),
         )
         if ok:
-            log(f"  ✓ [{idx}] {filename} ({os.path.getsize(save_path)//1024}KB)")
+            log(f"  ok [{idx}] {filename} ({os.path.getsize(save_path)//1024}KB)")
             success += 1
         else:
-            log(f"  ✗ [{idx}] 视频: {video_url[:60]}")
+            log(f"  x [{idx}] 视频: {video_url[:60]}")
             fail += 1
         time.sleep(random.uniform(0.3, 0.7))
 
-    log(f"\n视频结果: ✓{success} ✗{fail}")
+    log(f"\n视频结果: ok{success} x{fail}")
     if hls_pending:
         log(f"  HLS(m3u8) 待处理: {hls_pending} 个；清单：{hls_dir}/m3u8_list.txt")
         log(f"  处理示例: ffmpeg -i <m3u8_url> -c copy out.mp4")
@@ -880,7 +880,7 @@ async def main():
 
     board_url = args.board_url.strip().rstrip("/")
     if "pinterest.com" not in board_url.lower():
-        log("❌ 请提供有效的 Pinterest 画板 URL")
+        log("[错误] 请提供有效的 Pinterest 画板 URL")
         sys.exit(1)
 
     output_dir = args.output or args.output_positional
@@ -897,12 +897,12 @@ async def main():
             _tf.write("ok")
         os.remove(test_file)
     except PermissionError:
-        log(f"❌ 没有写入权限: {output_dir}")
+        log(f"[错误] 没有写入权限: {output_dir}")
         log("   Windows 用户请避免使用 C:\\Program Files 等系统目录")
         log("   建议改为: --output C:\\Users\\<你的用户名>\\Downloads\\pinterest")
         sys.exit(1)
     except OSError as e:
-        log(f"❌ 无法创建输出目录: {e}")
+        log(f"[错误] 无法创建输出目录: {e}")
         log("   Windows 用户注意：路径中不能包含 / \\ : * ? \" < > | 等特殊字符")
         sys.exit(1)
 
@@ -918,34 +918,35 @@ async def main():
     cfg["_cookie_header"] = cookie_header_from_jar(jar)
 
     print(f"\n{'='*64}")
-    print(f"  🎨 Pinterest Board Downloader v{__version__}  (Last Tested: {LAST_TESTED})")
+    print(f"  Pinterest Board Downloader v{__version__}  (Last Tested: {LAST_TESTED})")
     print(f"{'='*64}")
-    print(f"  📍 画板:   {board_url}")
-    print(f"  📂 输出:   {output_dir}")
-    print(f"  ⚙️  并发:   {cfg['image_concurrency']} | 重试 {cfg['image_retries']} | 命名 {args.name_by}")
+    print(f"  画板:   {board_url}")
+    print(f"  输出:   {output_dir}")
+    print(f"   并发:   {cfg['image_concurrency']} | 重试 {cfg['image_retries']} | 命名 {args.name_by}")
     if args.cookies:
-        print(f"  🔐 Cookie: {args.cookies}")
+        print(f"  [cookie] Cookie: {args.cookies}")
     if args.max_pins:
-        print(f"  🔢 限制:   最多 {args.max_pins} 个 Pin")
+        print(f"  限制:   最多 {args.max_pins} 个 Pin")
     if args.no_video:
-        print(f"  🎬 视频:   已跳过")
+        print(f"  视频:   已跳过")
     if args.resume:
-        print(f"  ⏩ 模式:   --resume 增量（复用缓存，跳过重新滚动）")
+        print(f"  模式:   --resume 增量（复用缓存，跳过重新滚动）")
     print(f"{'='*64}\n")
 
     # Phase 1
-    log("📋 [1/5] 滚动画板收集数据...")
+    log("[1/5] 滚动画板收集数据...")
     image_records, pin_ids = await collect_board_data(
         board_url, output_dir, cfg, resume=args.resume
     )
+    step_done = 1
 
     if args.max_pins > 0:
         image_records = image_records[: args.max_pins]
         pin_ids = pin_ids[: args.max_pins]
-        log(f"已按 --max-pins 截断到 {args.max_pins}")
+        log(f"  已按 --max-pins 截断到 {args.max_pins}")
 
     if not image_records and not pin_ids:
-        log("⚠️ 未收集到任何内容。可能原因：")
+        log("未收集到任何内容。可能原因：")
         log("    · 画板需要登录 → 使用 --cookies 传入 cookies.txt")
         log("    · 画板 URL 错误 / 画板被删除")
         log("    · 网络/地域限制 → 检查是否能正常访问 pinterest.com")
@@ -954,10 +955,12 @@ async def main():
     # Phase 2
     if args.no_video:
         video_results = []
-        log("\n🎬 [2/5] 已跳过视频检测（--no-video）")
+        log("\n[2/5] 已跳过视频检测（--no-video）")
+        step_done = 2
     else:
-        log(f"\n🎬 [2/5] 检测视频 Pin（{len(pin_ids)} 个）...")
+        log(f"\n[2/5] 检测视频 Pin（{len(pin_ids)} 个）...")
         video_results = await detect_video_pins(pin_ids, output_dir, cfg)
+        step_done = 2
 
     # 剔除视频 Pin 的封面图（视频 Pin 的封面图是缩略图，不应下载）
     if video_results:
@@ -966,26 +969,32 @@ async def main():
         image_records = [rec for rec in image_records if rec[0] not in video_pin_ids]
         removed = before - len(image_records)
         if removed:
-            log(f"  🔀 已剔除 {removed} 张视频封面图（这些 Pin 已有视频下载）")
+            log(f"  已剔除 {removed} 张视频封面图（这些 Pin 已有视频下载）")
 
     # Phase 3
-    log(f"\n🖼️ [3/5] 下载图片（{len(image_records)} 张）...")
+    total_imgs = len(image_records)
+    log(f"\n[3/5] 下载图片（{total_imgs} 张）...")
     img_s, img_f = await download_images_async(image_records, output_dir, cfg, args.name_by)
+    step_done = 3
 
     # Phase 4
     if video_results:
-        log(f"\n🎥 [4/5] 下载视频（{len(video_results)} 个）...")
+        total_vids = len(video_results)
+        log(f"\n[4/5] 下载视频（{total_vids} 个）...")
         vid_s, vid_f = download_videos(video_results, output_dir, cfg)
     else:
-        log("\n🎥 [4/5] 无视频，跳过")
+        log("\n[4/5] 无视频，跳过")
         vid_s = vid_f = 0
+    step_done = 4
 
     # Phase 5
-    log(f"\n🔍 [5/5] 补救式高清化...")
+    log(f"\n[5/5] 补救式高清化...")
     upgraded = upgrade_small_images(output_dir, cfg)
+    step_done = 5
 
     # 汇总
     total_files = img_s + vid_s
+    total_target = total_imgs + len(video_results)
     total_bytes = 0
     if os.path.isdir(output_dir):
         for dp, _, fns in os.walk(output_dir):
@@ -997,16 +1006,29 @@ async def main():
                 except OSError:
                     pass
 
+    # 进度条
+    pct = (total_files / total_target * 100) if total_target > 0 else 100
+    bar_w = 40
+    filled = int(bar_w * pct / 100)
+    dl_bar = "█" * filled + "░" * (bar_w - filled)
+
+    step_bar_w = 40
+    step_filled = int(step_bar_w * step_done / 5)
+    step_bar = "█" * step_filled + "░" * (step_bar_w - step_filled)
+
     print(f"\n{'='*64}")
-    print(f"  ✅ 全部完成!")
+    print(f"  全部完成!")
     print(f"{'='*64}")
-    print(f"  📂 目录:   {output_dir}")
-    print(f"  🖼️ 图片:   {img_s} 成功, {img_f} 失败")
+    print(f"  步骤:  [{step_bar}] {step_done}/5  收集 > 视频检测 > 图片 > 视频 > 高清化")
+    print(f"  下载:  [{dl_bar}] {pct:.0f}%  {total_files}/{total_target} 文件")
+    print(f"{'='*64}")
+    print(f"  目录:   {output_dir}")
+    print(f"  图片:   {img_s} 成功, {img_f} 失败")
     if video_results:
-        print(f"  🎬 视频:   {vid_s} 成功, {vid_f} 失败")
+        print(f"  视频:   {vid_s} 成功, {vid_f} 失败")
     if upgraded:
-        print(f"  ⬆️ 升级:   {upgraded} 张小图已高清化")
-    print(f"  📦 总计:   {total_files} 文件, {total_bytes / 1024 / 1024:.1f} MB")
+        print(f"  升级:   {upgraded} 张小图已高清化")
+    print(f"  总计:   {total_files} 文件, {total_bytes / 1024 / 1024:.1f} MB")
     print(f"{'='*64}\n")
 
 
@@ -1014,5 +1036,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("\n⏹️ 用户中断。已下载文件保留在输出目录，重跑会自动断点续传。")
+        log("\n用户中断。已下载文件保留在输出目录，重跑会自动断点续传。")
         sys.exit(130)
