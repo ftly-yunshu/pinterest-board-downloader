@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>一键下载 Pinterest 画板中的全部图片和视频到本地</strong><br>
-  <sub>原图优先 · 并发+重试 · 视频支持 · 私密画板 · 增量续传</sub>
+  <sub>原图优先 · 并发下载 · 视频支持 · 断点续传 · 零依赖上手</sub>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
 | **失败不重试 / 403 直接放弃** | 一次超时/403 就放弃 | ✅ 3 次指数退避重试；**403 专项退避**，应对 CDN 临时鉴权拒绝；429/503 限流退避 |
 | **串行下载慢** | 500 张要跑 10+ 分钟 | ✅ aiohttp 并发下载（默认 8，可调），500 张约 1-2 分钟 |
 | **重跑全量扫描** | 每次都重新滚动全部画板 | ✅ `--resume` 增量模式：复用 `_urls_cache.txt`，只下载 `_manifest.txt` 里尚未记录的新图 |
-| **不支持私密画板** | 只能下公开画板 | ✅ `--cookies cookies.txt` 支持 Netscape 格式 |
+| **不支持私密画板** | 只能下公开画板 | ✅ `--cookies cookies.txt` 支持 |
 | **要求输入账号密码** | 第三方工具常见，极大安全隐患 | ✅ **永不索取密码**，仅支持 cookie |
 | **视频完全不下载** | 画板里的 Idea Pin / 视频直接跳过 | ✅ 并发检测 + MP4 直链下载；HLS (m3u8) 导出清单供 ffmpeg |
 | **反爬应对不足** | 固定 UA、固定间隔，容易被限 | ✅ UA 轮换、滚动抖动、请求间隔抖动 |
@@ -40,66 +40,100 @@
 
 ---
 
-## 🚀 安装（3 种方式）
+## 🚀 安装与使用（保姆级教程）
 
-### ① 作为 AI Skill 安装（推荐）
+> 以下教程默认将文件下载到**桌面**。如果你熟悉命令行，可以跳过直接看 [参数详解](#-参数详解)。
 
-通过 `npx skills` 安装到任意兼容的 AI Agent（WorkBuddy / CodeBuddy / Cline / Cursor / Codex / Copilot 等）：
+### 🍎 macOS 用户
+
+打开**终端**（在「启动台」搜索"终端"或按 `Command + 空格` 搜索 "Terminal"），依次复制粘贴以下命令：
+
+**第 1 步：下载脚本到桌面**
+```bash
+curl -o ~/Desktop/pinterest_download.py https://raw.githubusercontent.com/ftly-yunshu/pinterest-board-downloader/main/scripts/pinterest_download.py
+```
+
+**第 2 步：安装依赖（只需运行一次）**
+```bash
+pip3 install playwright aiohttp
+```
+
+> 如果报 `Permission denied`，改为：
+> ```bash
+> pip3 install playwright aiohttp --break-system-packages
+> ```
+
+**第 3 步：安装浏览器内核（只需运行一次）**
+```bash
+python3 -m playwright install chromium
+```
+
+**第 4 步：开始下载！**
+```bash
+python3 ~/Desktop/pinterest_download.py "https://www.pinterest.com/用户名/画板名/" --output ~/Desktop/Pinterest下载
+```
+
+下载完成后，在桌面找到 `Pinterest下载` 文件夹即可。
+
+---
+
+### 🪟 Windows 用户
+
+按 `Win + R`，输入 `powershell`，回车打开 PowerShell。
+
+**第 1 步：下载脚本到桌面**
+```powershell
+curl -o "$env:USERPROFILE\Desktop\pinterest_download.py" https://raw.githubusercontent.com/ftly-yunshu/pinterest-board-downloader/main/scripts/pinterest_download.py
+```
+
+**第 2 步：安装依赖（只需运行一次）**
+```powershell
+pip install playwright aiohttp
+```
+
+> 如果报 `No Python` 或红字错误，说明还没装 Python → 去 [python.org](https://www.python.org/downloads/) 下载安装，安装时勾选 **"Add Python to PATH"**。
+>
+> 如果报 `Permission denied`，以**管理员身份**重新打开 PowerShell 再运行。
+
+**第 3 步：安装浏览器内核（只需运行一次）**
+```powershell
+python -m playwright install chromium
+```
+
+**第 4 步：开始下载！**
+```powershell
+python "%USERPROFILE%\Desktop\pinterest_download.py" "https://www.pinterest.com/用户名/画板名/" --output "%USERPROFILE%\Desktop\Pinterest下载"
+```
+
+下载完成后，在桌面找到 `Pinterest下载` 文件夹即可。
+
+---
+
+### 🤖 作为 AI Skill 安装（高级）
+
+如果你使用 WorkBuddy / CodeBuddy / Cline / Cursor 等 AI 工具：
 
 ```bash
 npx skills add https://github.com/ftly-yunshu/pinterest-board-downloader --skill pinterest-downloader -y
 ```
 
-安装完成后，直接对 AI 说：
-
-> 帮我下载这个 Pinterest 画板：`https://www.pinterest.com/<user>/<board>/`
-
-AI 会自动识别并调用本 Skill。
-
-### ② 纯命令行使用
-
-```bash
-git clone https://github.com/ftly-yunshu/pinterest-board-downloader.git
-cd pinterest-board-downloader
-
-pip install playwright aiohttp
-playwright install chromium
-
-python3 scripts/pinterest_download.py https://www.pinterest.com/user/board/
-```
-
-### ③ 单文件下载（无需克隆）
-
-```bash
-curl -O https://raw.githubusercontent.com/ftly-yunshu/pinterest-board-downloader/main/scripts/pinterest_download.py
-pip install playwright aiohttp && playwright install chromium
-python3 pinterest_download.py <URL>
-```
+安装后直接对 AI 说："帮我下载这个 Pinterest 画板：`https://pinterest.com/xxx/yyy/`"
 
 ---
 
-## 📖 用法速查
+### 💡 更多用法示例
 
 ```bash
-# 基础：下载公开画板
-python3 pinterest_download.py https://www.pinterest.com/user/board/
+# 先试 50 张看看效果
+python3 pinterest_download.py <URL> --max-pins 50 --output ~/Desktop/测试下载
 
-# 指定输出目录 + 并发数
-python3 pinterest_download.py <URL> --output ./my_images --concurrency 12
+# 网络不太好的时候，降低并发
+python3 pinterest_download.py <URL> --concurrency 3 --scroll-pause 2.5 --output ~/Desktop/Pinterest下载
 
-# 只想先试 50 张
-python3 pinterest_download.py <URL> --max-pins 50
+# 画板更新了新内容，只想下载新增的（增量模式）
+python3 pinterest_download.py <URL> --output ~/Desktop/Pinterest下载 --resume
 
-# 私密画板：先用浏览器扩展导出 cookies.txt
-python3 pinterest_download.py <URL> --cookies cookies.txt
-
-# 温和模式（网络差或怕被限流时）
-python3 pinterest_download.py <URL> --concurrency 3 --scroll-pause 2.5
-
-# 用 Pin ID 命名文件 + 跳过视频
-python3 pinterest_download.py <URL> --name-by pin --no-video
-
-# 查看所有参数
+# 查看所有可用参数
 python3 pinterest_download.py --help
 ```
 
@@ -114,7 +148,7 @@ python3 pinterest_download.py --help
 | `--concurrency` | `8` | 图片并发下载数 |
 | `--retries` | `3` | 每张图片最大重试次数（指数退避，含 403/429/503） |
 | `--max-pins` | `0` | 最多处理的 Pin 数量，0 = 不限 |
-| `--cookies` | — | Netscape 格式 cookies.txt（私密画板用） |
+| `--cookies` | — | 传入 cookies 文件路径（高级用法，参见源码注释） |
 | `--name-by` | `seq` | 文件命名：`seq` 纯序号 / `pin` 含 Pin ID |
 | `--no-video` | — | 跳过视频检测与下载 |
 | `--resume` | — | 增量模式：复用上次缓存跳过重新滚动，只下载新增图片 |
@@ -143,51 +177,37 @@ output_dir/
 
 ## 🔒 安全与隐私
 
-**本工具的安全承诺**：
-
 - ❌ **永不请求**你的 Pinterest 账号或密码
 - ❌ **不发送任何数据**到第三方服务器
 - ✅ 所有操作均在**本地**完成（除了必要的 Pinterest CDN 请求）
-- ✅ 私密画板仅通过**用户主动提供**的 `cookies.txt` 访问
-- ✅ Cookie 文件**始终保留在用户本地**，脚本不会上传
-
-### 如何安全地导出 Cookies（访问私密画板）
-
-1. 在 Chrome/Firefox 安装可信的扩展（如开源的 **Get cookies.txt LOCALLY**）
-2. 登录 `https://www.pinterest.com/`
-3. 点击扩展 → **Export for pinterest.com** → 保存为 `cookies.txt`
-4. 传给脚本：`--cookies /path/to/cookies.txt`
-
-> ⚠️ **切勿**在非官方网页输入 Pinterest 账号密码。
-> ⚠️ `cookies.txt` 包含你的完整账号权限，不要分享给任何人、不要上传到网络。
+- ✅ 纯开源单文件，代码完全透明，可自行审计
 
 ---
 
 ## 🪟 Windows 用户须知
 
-### 输出路径选择
+### 没装 Python？
+
+脚本需要 Python 3.8+。如果第 2 步报错 `No Python`：
+
+1. 打开 [python.org/downloads](https://www.python.org/downloads/)
+2. 下载最新的 Python 3 安装包
+3. 安装时**务必勾选** `Add Python to PATH`
+4. 安装完成后重新打开 PowerShell 再试
+
+### 安装报 "Access Denied"？
+
+以**管理员身份**打开 PowerShell：
+- 按 `Win` 键，搜索 "PowerShell"
+- 右键 → **以管理员身份运行**
+- 再执行 `pip install playwright aiohttp`
+
+### 输出路径
+
+脚本默认下载到当前目录。教程中已使用 `--output` 指定到桌面，你也可以改成任意路径：
 
 ```powershell
-# ✅ 推荐路径
-python pinterest_download.py <URL> --output C:\Users\你的用户名\Downloads\pinterest
-
-# ❌ 避免的路径（权限不足会报错）
-# C:\Program Files\...
-# C:\Windows\...
-```
-
-脚本启动时会自动检测写入权限，如遇 `PermissionError` 会给出具体建议。
-
-### 非法字符
-
-Windows 文件名不能含 `/ \ : * ? " < > |`。本工具默认用数字序号命名（`pinterest_0001.jpg`），不会触发此问题。若使用 `--name-by pin`，Pin ID 均为纯数字，同样安全。
-
-### Playwright 安装
-
-```powershell
-pip install playwright aiohttp
-playwright install chromium
-# 若报 "Access Denied"，以管理员身份运行 PowerShell
+--output "D:\我的素材\Pinterest"
 ```
 
 ---
@@ -267,13 +287,13 @@ python3 pinterest_download.py <URL> --output ./out --resume
 
 | 症状 | 可能原因 | 解决方案 |
 |------|---------|---------|
-| 收集到 0 张图片 | 画板需登录 / URL 错误 / 网络限制 | 检查 URL；提供 `--cookies`；换网络环境 |
-| HTTP 403 大量出现 | CDN 临时鉴权拒绝 | 脚本已自动退避重试；若持续，提供 `--cookies` |
+| 收集到 0 张图片 | 画板需登录 / URL 错误 / 网络限制 | 检查 URL 格式；换网络环境重试 |
+| HTTP 403 大量出现 | CDN 临时鉴权拒绝 | 脚本已自动退避重试；若持续请稍后再试 |
 | HTTP 429 / 503 大量出现 | 并发太激进 | `--concurrency 3 --scroll-pause 3` |
 | 图片下载后大量 < 50KB | CDN 返回了缩略图 | 脚本阶段 5 会自动补救；极端情况下该 Pin 的源图本身就小 |
 | 视频检测为 0 但画板有视频 | 全是 HLS 流 | 查 `videos_hls/m3u8_list.txt`，用 `ffmpeg -i <URL> -c copy out.mp4` |
-| `playwright install` 失败 | 系统 Python 受保护 | 用 venv 或 `pip install --break-system-packages playwright` |
-| Windows PermissionError | 输出目录权限不足 | 改用 `--output C:\Users\<用户名>\Downloads\pinterest` |
+| `playwright install` 失败 | 系统 Python 受保护 | macOS: `--break-system-packages`；Windows: 管理员 PowerShell |
+| Windows PermissionError | 输出目录权限不足 | `--output "%USERPROFILE%\Desktop\Pinterest下载"` |
 | 中断后再跑是否会重复下载 | — | 不会；`_manifest.txt` 会跳过已完成的 URL |
 | 画板新增了内容，不想全量重跑 | — | `--resume` 增量模式，只下新图，跳过重新滚动 |
 
