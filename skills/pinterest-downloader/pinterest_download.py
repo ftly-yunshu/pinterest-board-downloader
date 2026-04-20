@@ -186,11 +186,25 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
 
     log("启动浏览器 ...")
     p = await async_playwright().start()
-    browser = await p.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-              "--disable-blink-features=AutomationControlled"],
-    )
+    # 优先使用系统 Chrome，无需额外安装 Chromium；若失败则回退到 Playwright Chromium
+    browser = None
+    try:
+        import shutil
+        if shutil.which("google-chrome") or shutil.which("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
+            log("  ✓ 检测到系统 Chrome，直接使用（无需 playwright install chromium）")
+            browser = await p.chromium.launch(
+                headless=True, channel="chrome",
+                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                      "--disable-blink-features=AutomationControlled"],
+        )
+    except Exception:
+        log("  ⚠ 系统 Chrome 启动失败，回退到 Playwright Chromium")
+    if browser is None:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"],
+        )
     ctx = await browser.new_context(
         user_agent=pick_ua(),
         viewport={"width": 1920, "height": 1080},
