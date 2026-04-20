@@ -186,19 +186,48 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
 
     log("启动浏览器 ...")
     p = await async_playwright().start()
-    # 优先使用系统 Chrome，无需额外安装 Chromium；若失败则回退到 Playwright Chromium
+    # 优先使用系统浏览器，无需额外安装 Chromium
     browser = None
     try:
-        import shutil
-        if shutil.which("google-chrome") or shutil.which("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
-            log("  ✓ 检测到系统 Chrome，直接使用（无需 playwright install chromium）")
+        import shutil, platform, os
+        channel = None
+        if platform.system() == "Darwin":
+            mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            if os.path.exists(mac_chrome):
+                channel = "chrome"
+        elif platform.system() == "Windows":
+            # Edge 几乎所有 Windows 10/11 自带，优先使用
+            edge_paths = [
+                os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+                os.path.join(os.environ.get("PROGRAMFILES", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+            ]
+            chrome_paths = [
+                os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            ]
+            for ep in edge_paths:
+                if os.path.exists(ep):
+                    channel = "msedge"
+                    break
+            if not channel:
+                for cp in chrome_paths:
+                    if os.path.exists(cp):
+                        channel = "chrome"
+                        break
+        else:
+            if shutil.which("google-chrome"):
+                channel = "chrome"
+            elif shutil.which("microsoft-edge"):
+                channel = "msedge"
+        if channel:
+            log(f"  ✓ 检测到系统浏览器（{channel}），直接使用（无需 playwright install chromium）")
             browser = await p.chromium.launch(
-                headless=True, channel="chrome",
+                headless=True, channel=channel,
                 args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
                       "--disable-blink-features=AutomationControlled"],
         )
     except Exception:
-        log("  ⚠ 系统 Chrome 启动失败，回退到 Playwright Chromium")
+        log("  ⚠ 系统浏览器启动失败，回退到 Playwright Chromium")
     if browser is None:
         browser = await p.chromium.launch(
             headless=True,
