@@ -187,7 +187,7 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
     log("启动浏览器 ...")
     p = await async_playwright().start()
     # 优先使用系统浏览器，无需额外安装 Chromium
-    import shutil, platform, os
+    import shutil, platform
     channel = None
     if platform.system() == "Darwin":
         mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
