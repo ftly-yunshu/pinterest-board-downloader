@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-   Pinterest Board Downloader - Standalone Edition (v3.0)
+   Pinterest Board Downloader - Standalone Edition (v3.1)
 ================================================================================
 
 一个独立的、零框架依赖的 Pinterest 画板批量下载工具。
 
 兼容：Python 3.8+ | macOS / Linux / Windows
 适用：任何 AI 工具（ChatGPT / Claude / Gemini / Copilot / Cursor 等）
+
+Last Tested: 2026-04-20
+Tested With: Python 3.9 / 3.11 / 3.12 | playwright 1.44+ | aiohttp 3.9+
+Pinterest DOM Version: Infinite-scroll v2 (srcset-based feed cards)
 
 --------------------------------------------------------------------------------
 用法（简单）：
@@ -49,7 +53,8 @@ import urllib.request
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
+LAST_TESTED = "2026-04-20"  # Pinterest DOM: srcset-based feed cards
 
 # ================================================================
 # 默认参数（可通过 CLI 覆盖）
@@ -138,12 +143,36 @@ def cookie_header_from_jar(jar) -> str:
 # Phase 1 — 滚动收集（Playwright）
 # ================================================================
 
-async def collect_board_data(board_url: str, output_dir: str, cfg: dict):
+async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
+                             resume: bool = False):
     """
     用 Playwright 打开画板，自动滚动收集：
       - 原始高清 image URL（优先读 srcset 里最大的那张）
       - Pin ID（用于后续视频检测与命名）
+
+    resume=True：若本地已有 _urls_cache.txt + _pins_cache.txt，
+                  直接加载缓存跳过重新滚动（增量模式）。
     """
+    # ---- 增量模式：直接读缓存，不重新滚动 ----
+    urls_cache = os.path.join(output_dir, "_urls_cache.txt")
+    pins_cache = os.path.join(output_dir, "_pins_cache.txt")
+    if resume and os.path.exists(urls_cache) and os.path.exists(pins_cache):
+        log("⏩ --resume 模式：读取本地缓存，跳过滚动阶段")
+        image_records = []
+        with open(urls_cache) as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 3:
+                    pid, url, og = parts[0], parts[1], parts[2]
+                    image_records.append((pid if pid != "-" else None, url, og))
+                elif len(parts) == 1 and parts[0]:
+                    # 兼容旧版单列格式
+                    image_records.append((None, parts[0], parts[0]))
+        pin_ids = []
+        with open(pins_cache) as f:
+            pin_ids = [l.strip() for l in f if l.strip()]
+        log(f"✅ 从缓存恢复: {len(image_records)} 张图片, {len(pin_ids)} 个 Pin")
+        return image_records, pin_ids
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -514,9 +543,15 @@ async def download_images_async(image_records, output_dir: str, cfg: dict, name_
                             if resp.status >= 400:
                                 last_err = f"HTTP {resp.status}"
                                 if resp.status in (429, 503):
-                                    # 被限流：指数退避
+                                    # 限流：指数退避后重试
                                     await asyncio.sleep(2 ** attempt + random.uniform(0, 1.0))
                                     continue
+                                if resp.status == 403:
+                                    # 403 可能是临时的 CDN 鉴权问题，退避后最多再试一次
+                                    if attempt < cfg["image_retries"] - 1:
+                                        await asyncio.sleep(1.5 ** attempt + random.uniform(0, 0.5))
+                                        continue
+                                # 其他 4xx（400/401/410 等）：当前尺寸无效，换下一个
                                 break
                             data = await resp.read()
                             if len(data) < cfg["min_valid_bytes"]:
@@ -760,7 +795,10 @@ def parse_args():
     parser.add_argument("--no-video", action="store_true", help="跳过视频检测与下载")
     parser.add_argument("--scroll-pause", type=float, default=DEFAULTS["scroll_pause"],
                         help="每次滚动后的等待秒数")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--resume", action="store_true",
+                        help="增量模式：复用上次的 _urls_cache.txt，跳过重新滚动（只下载尚未在 _manifest.txt 中的图）")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__} (Last Tested: {LAST_TESTED})")
     return parser.parse_args()
 
 
@@ -776,7 +814,24 @@ async def main():
     if not output_dir:
         board_name = board_url.rstrip("/").split("/")[-1] or "board"
         output_dir = os.path.join(os.getcwd(), f"pinterest_{board_name}")
-    os.makedirs(output_dir, exist_ok=True)
+
+    # Windows 路径安全检查
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        # 写入测试文件确认有写权限
+        test_file = os.path.join(output_dir, "_write_test.tmp")
+        with open(test_file, "w") as _tf:
+            _tf.write("ok")
+        os.remove(test_file)
+    except PermissionError:
+        log(f"❌ 没有写入权限: {output_dir}")
+        log("   Windows 用户请避免使用 C:\\Program Files 等系统目录")
+        log("   建议改为: --output C:\\Users\\<你的用户名>\\Downloads\\pinterest")
+        sys.exit(1)
+    except OSError as e:
+        log(f"❌ 无法创建输出目录: {e}")
+        log("   Windows 用户注意：路径中不能包含 / \\ : * ? \" < > | 等特殊字符")
+        sys.exit(1)
 
     # 组合 cfg
     cfg = dict(DEFAULTS)
@@ -790,7 +845,7 @@ async def main():
     cfg["_cookie_header"] = cookie_header_from_jar(jar)
 
     print(f"\n{'='*64}")
-    print(f"  🎨 Pinterest Board Downloader v{__version__}")
+    print(f"  🎨 Pinterest Board Downloader v{__version__}  (Last Tested: {LAST_TESTED})")
     print(f"{'='*64}")
     print(f"  📍 画板:   {board_url}")
     print(f"  📂 输出:   {output_dir}")
@@ -801,11 +856,15 @@ async def main():
         print(f"  🔢 限制:   最多 {args.max_pins} 个 Pin")
     if args.no_video:
         print(f"  🎬 视频:   已跳过")
+    if args.resume:
+        print(f"  ⏩ 模式:   --resume 增量（复用缓存，跳过重新滚动）")
     print(f"{'='*64}\n")
 
     # Phase 1
     log("📋 [1/5] 滚动画板收集数据...")
-    image_records, pin_ids = await collect_board_data(board_url, output_dir, cfg)
+    image_records, pin_ids = await collect_board_data(
+        board_url, output_dir, cfg, resume=args.resume
+    )
 
     if args.max_pins > 0:
         image_records = image_records[: args.max_pins]

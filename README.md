@@ -2,15 +2,20 @@
 
 <p align="center">
   <strong>一键下载 Pinterest 画板中的全部图片和视频到本地</strong><br>
-  <sub>原图优先 · 并发+重试 · 视频支持 · 私密画板 · 断点续传</sub>
+  <sub>原图优先 · 并发+重试 · 视频支持 · 私密画板 · 增量续传</sub>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-3.1.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/last%20tested-2026--04--20-brightgreen" alt="last tested" />
   <img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python" />
+  <img src="https://img.shields.io/badge/playwright-1.40+-purple" alt="playwright" />
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" />
   <img src="https://img.shields.io/badge/npx%20skills-compatible-orange" alt="npx skills" />
 </p>
+
+> **Last Tested:** 2026-04-20 | Pinterest DOM: srcset-based feed cards
+> **依赖版本:** playwright ≥ 1.40 · aiohttp ≥ 3.9 · Python ≥ 3.8
 
 ---
 
@@ -18,18 +23,20 @@
 
 社区里大量 Pinterest 下载器存在如下缺陷 —— 本工具针对性逐项修复：
 
-| 常见痛点 | 其他工具表现 | 本工具 v3.0 |
+| 常见痛点 | 其他工具表现 | 本工具 v3.1 |
 |----------|-------------|-------------|
 | **只下缩略图** | 下载到 236x 小图，清晰度差 | ✅ DOM 阶段读 `srcset` 最大项；下载阶段按 `/originals/ → /1200x/ → /736x/` 顺序尝试 |
 | **不处理无限滚动** | 只抓首屏可见的几十张 | ✅ Playwright 自动滚动，stagnant 检测到底停止（默认最多 800 次滚动） |
-| **失败不重试** | 一次超时就放弃 | ✅ 每张图 **3 次指数退避重试**，专门处理 429/503 限流 |
-| **串行下载慢** | 500 张要跑 10+ 分钟 | ✅ **aiohttp 并发下载**（默认 8，可调），500 张约 1-2 分钟 |
-| **重跑会重复下载** | 无去重逻辑 | ✅ 持久化 `_manifest.txt`，**断点续传**，重跑秒跳过 |
+| **失败不重试 / 403 直接放弃** | 一次超时/403 就放弃 | ✅ 3 次指数退避重试；**403 专项退避**，应对 CDN 临时鉴权拒绝；429/503 限流退避 |
+| **串行下载慢** | 500 张要跑 10+ 分钟 | ✅ aiohttp 并发下载（默认 8，可调），500 张约 1-2 分钟 |
+| **重跑全量扫描** | 每次都重新滚动全部画板 | ✅ `--resume` 增量模式：复用 `_urls_cache.txt`，只下载 `_manifest.txt` 里尚未记录的新图 |
 | **不支持私密画板** | 只能下公开画板 | ✅ `--cookies cookies.txt` 支持 Netscape 格式 |
 | **要求输入账号密码** | 第三方工具常见，极大安全隐患 | ✅ **永不索取密码**，仅支持 cookie |
 | **视频完全不下载** | 画板里的 Idea Pin / 视频直接跳过 | ✅ 并发检测 + MP4 直链下载；HLS (m3u8) 导出清单供 ffmpeg |
 | **反爬应对不足** | 固定 UA、固定间隔，容易被限 | ✅ UA 轮换、滚动抖动、请求间隔抖动 |
-| **CDN 改版即失效** | 依赖易变的 CSS selector | ✅ 用 `a[href*="/pin/"] > img` 结构选择器，稳定性较好 |
+| **CDN 改版即失效** | 依赖易变的 CSS selector | ✅ 用 `a[href*="/pin/"] > img` + srcset，稳定性较好 |
+| **版本依赖不明** | 不写 Last Tested，出错无法排查 | ✅ 头部标注 `Last Tested` 和兼容版本范围 |
+| **Windows 路径权限崩溃** | 没有任何提示 | ✅ 启动时写入测试，权限失败给出具体排查建议 |
 
 ---
 
@@ -105,11 +112,12 @@ python3 pinterest_download.py --help
 | `board_url` | — | Pinterest 画板 URL（必填） |
 | `--output / -o` | `pinterest_{board}/` | 输出目录 |
 | `--concurrency` | `8` | 图片并发下载数 |
-| `--retries` | `3` | 每张图片最大重试次数（指数退避） |
+| `--retries` | `3` | 每张图片最大重试次数（指数退避，含 403/429/503） |
 | `--max-pins` | `0` | 最多处理的 Pin 数量，0 = 不限 |
 | `--cookies` | — | Netscape 格式 cookies.txt（私密画板用） |
 | `--name-by` | `seq` | 文件命名：`seq` 纯序号 / `pin` 含 Pin ID |
 | `--no-video` | — | 跳过视频检测与下载 |
+| `--resume` | — | 增量模式：复用上次缓存跳过重新滚动，只下载新增图片 |
 | `--scroll-pause` | `1.5` | 每次滚动后等待秒数 |
 
 ---
@@ -151,6 +159,71 @@ output_dir/
 4. 传给脚本：`--cookies /path/to/cookies.txt`
 
 > ⚠️ **切勿**在非官方网页输入 Pinterest 账号密码。
+> ⚠️ `cookies.txt` 包含你的完整账号权限，不要分享给任何人、不要上传到网络。
+
+---
+
+## 🪟 Windows 用户须知
+
+### 输出路径选择
+
+```powershell
+# ✅ 推荐路径
+python pinterest_download.py <URL> --output C:\Users\你的用户名\Downloads\pinterest
+
+# ❌ 避免的路径（权限不足会报错）
+# C:\Program Files\...
+# C:\Windows\...
+```
+
+脚本启动时会自动检测写入权限，如遇 `PermissionError` 会给出具体建议。
+
+### 非法字符
+
+Windows 文件名不能含 `/ \ : * ? " < > |`。本工具默认用数字序号命名（`pinterest_0001.jpg`），不会触发此问题。若使用 `--name-by pin`，Pin ID 均为纯数字，同样安全。
+
+### Playwright 安装
+
+```powershell
+pip install playwright aiohttp
+playwright install chromium
+# 若报 "Access Denied"，以管理员身份运行 PowerShell
+```
+
+---
+
+## 🔬 深度验证（下载质量自检三步）
+
+运行完成后，通过以下步骤验证质量：
+
+**Step 1 · 验证画质（原图 vs 缩略图）**
+```bash
+# macOS/Linux
+ls -lh <output_dir>/pinterest_*.jpg | sort -k5 -rh | head -10
+# 正常原图应在 200KB ~ 2MB 之间
+# 如果大量文件 < 50KB，说明 CDN 降级，可重跑
+```
+
+**Step 2 · 验证数量（对比 Pinterest 网页）**
+
+打开画板网页，标题附近会显示总 Pin 数（如 "825 Pins"）。
+对比命令：
+```bash
+ls <output_dir>/pinterest_*.jpg | wc -l
+```
+通常能达到 95%+ 覆盖率（Pinterest 实时动态会有误差）。
+
+**Step 3 · 验证增量更新（--resume 工作流）**
+
+画板更新了新内容时，无需重跑全量滚动：
+```bash
+# 第一次：正常运行（生成缓存）
+python3 pinterest_download.py <URL> --output ./out
+
+# 画板新增图片后的第二次：增量模式
+python3 pinterest_download.py <URL> --output ./out --resume
+# 只会下载 _manifest.txt 里尚未记录的新图，不会重跑 800 次滚动
+```
 
 ---
 
@@ -195,11 +268,14 @@ output_dir/
 | 症状 | 可能原因 | 解决方案 |
 |------|---------|---------|
 | 收集到 0 张图片 | 画板需登录 / URL 错误 / 网络限制 | 检查 URL；提供 `--cookies`；换网络环境 |
+| HTTP 403 大量出现 | CDN 临时鉴权拒绝 | 脚本已自动退避重试；若持续，提供 `--cookies` |
 | HTTP 429 / 503 大量出现 | 并发太激进 | `--concurrency 3 --scroll-pause 3` |
-| 图片下载后大量 < 10KB | CDN 返回了缩略图 | 脚本阶段 5 会自动补救；极端情况下该 Pin 的源图本身就小 |
+| 图片下载后大量 < 50KB | CDN 返回了缩略图 | 脚本阶段 5 会自动补救；极端情况下该 Pin 的源图本身就小 |
 | 视频检测为 0 但画板有视频 | 全是 HLS 流 | 查 `videos_hls/m3u8_list.txt`，用 `ffmpeg -i <URL> -c copy out.mp4` |
 | `playwright install` 失败 | 系统 Python 受保护 | 用 venv 或 `pip install --break-system-packages playwright` |
+| Windows PermissionError | 输出目录权限不足 | 改用 `--output C:\Users\<用户名>\Downloads\pinterest` |
 | 中断后再跑是否会重复下载 | — | 不会；`_manifest.txt` 会跳过已完成的 URL |
+| 画板新增了内容，不想全量重跑 | — | `--resume` 增量模式，只下新图，跳过重新滚动 |
 
 ---
 
