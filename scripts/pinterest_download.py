@@ -227,17 +227,25 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
         # JS：一次性返回图片（pin_id + 最高分辨率 url） + 所有 pin_id
         js_extract = r"""
         () => {
-            // 把 /XXXx/ 段升级成最大可用尺寸 URL（用于做候选列表）
+            // 把 /XXXx/ 段升级成 /originals/（去重用）
             const toOriginal = (u) => {
                 if (!u) return u;
+                // 匹配各种 CDN 尺寸路径：/236x/, /736x/, /originals/ 等
+                // 也处理带 /r/.../ 前缀的情况
                 const m = u.match(/(\/\d+x\/|\/originals\/)/);
                 if (!m) return u;
-                // 先试 originals，后面下载阶段会自行回退
                 return u.replace(m[1], '/originals/');
             };
 
+            // 纯文件名去重 key：只保留最后一个 / 之后的内容
+            const fileKey = (u) => {
+                if (!u) return u;
+                return u.split('?')[0].split('/').filter(Boolean).slice(-1)[0] || u;
+            };
+
             const imgs = [];
-            const seenU = new Set();
+            const seenU = new Set();    // by originalGuess
+            const seenF = new Set();    // by filename (兜底)
 
             // 1) 遍历所有 <a href="/pin/xxx/"> 这类卡片，从卡片内部找 <img>
             document.querySelectorAll('a[href*="/pin/"]').forEach(a => {
@@ -267,7 +275,11 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
                 best = best.split('?')[0];
                 const originalGuess = toOriginal(best);
                 if (seenU.has(originalGuess)) return;
+                // 双重去重：文件名也检查，防止不同 CDN 路径同一文件
+                const fk = fileKey(best);
+                if (seenF.has(fk)) return;
                 seenU.add(originalGuess);
+                seenF.add(fk);
 
                 imgs.push({ pin: pid, url: best, orig_guess: originalGuess });
             });
@@ -282,7 +294,10 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
                 const clean = u.split('?')[0];
                 const og = toOriginal(clean);
                 if (seenU.has(og)) return;
+                const fk = fileKey(clean);
+                if (seenF.has(fk)) return;
                 seenU.add(og);
+                seenF.add(fk);
                 imgs.push({ pin: null, url: clean, orig_guess: og });
             });
 
@@ -325,6 +340,13 @@ async def collect_board_data(board_url: str, output_dir: str, cfg: dict,
             else:
                 stagnant = 0
             prev_total = total
+
+            # 智能 Pin 数量上限检测
+            # 如果图片数远超 Pin 数，说明 Pinterest 注入了推荐内容，提前停止
+            if len(pin_ids) > 0 and total > len(pin_ids) * 1.3:
+                log(f"  ⚠️ 图片数({total})明显超过 Pin 数({len(pin_ids)})，")
+                log(f"     可能进入了 Pinterest 推荐区域，提前停止滚动")
+                break
 
             # 随机抖动滚动节奏
             await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
@@ -885,6 +907,15 @@ async def main():
     else:
         log(f"\n🎬 [2/5] 检测视频 Pin（{len(pin_ids)} 个）...")
         video_results = await detect_video_pins(pin_ids, output_dir, cfg)
+
+    # 剔除视频 Pin 的封面图（视频 Pin 的封面图是缩略图，不应下载）
+    if video_results:
+        video_pin_ids = {pid for pid, _, _ in video_results}
+        before = len(image_records)
+        image_records = [rec for rec in image_records if rec[0] not in video_pin_ids]
+        removed = before - len(image_records)
+        if removed:
+            log(f"  🔀 已剔除 {removed} 张视频封面图（这些 Pin 已有视频下载）")
 
     # Phase 3
     log(f"\n🖼️ [3/5] 下载图片（{len(image_records)} 张）...")
